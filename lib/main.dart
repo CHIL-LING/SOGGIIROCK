@@ -10,6 +10,7 @@ void main() async {
   await Hive.openBox('studyRecords');
   await Hive.openBox('sentences');
   await Hive.openBox('reminders');
+    await Hive.openBox('groups');
   runApp(const SoggiApp());
 }
 
@@ -45,6 +46,20 @@ String decodeWordForSearch(String word) {
 // ════════════════════════════════════════════════════════
 // 데이터 모델
 // ════════════════════════════════════════════════════════
+
+class GroupModel {
+  final String id;
+  final String name;
+  final int colorValue;
+  GroupModel({required this.id, required this.name, required this.colorValue});
+  Map<String, dynamic> toMap() => {'id': id, 'name': name, 'colorValue': colorValue};
+  factory GroupModel.fromMap(Map<dynamic, dynamic> map) => GroupModel(
+    id: map['id'] ?? '',
+    name: map['name'] ?? '',
+    colorValue: map['colorValue'] ?? Colors.grey.value,
+  );
+}
+
 class AbbreviationModel {
   final String id;
   final String word;       // * 포함 저장형
@@ -79,7 +94,7 @@ class AbbreviationModel {
     'initial': initial, 'medial': medial, 'final_': final_,
     'isComposite': isComposite, 'isConcurrent': isConcurrent,
     'isAttached': isAttached, 'isFavorite': isFavorite,
-  };
+  , 'groupId': groupId};
 
   factory AbbreviationModel.fromMap(Map m) => AbbreviationModel(
     id:           m['id']           as String,
@@ -96,7 +111,7 @@ class AbbreviationModel {
   AbbreviationModel copyWith({
     String? word, List<String>? initial, List<String>? medial,
     List<String>? final_, bool? isComposite, bool? isConcurrent,
-    bool? isAttached, bool? isFavorite,
+    bool? isAttached, bool? isFavorite, String? groupId,
   }) => AbbreviationModel(
     id: id,
     word:         word         ?? this.word,
@@ -994,7 +1009,7 @@ class SearchScreen extends StatefulWidget {
 }
 class _SearchScreenState extends State<SearchScreen> {
   final _ctrl=TextEditingController();
-  bool _showFavOnly=false;
+  bool _showFavOnly=false; String? _selectedGroupId;
 
   @override
   Widget build(BuildContext context) {
@@ -1006,6 +1021,7 @@ class _SearchScreenState extends State<SearchScreen> {
         // ★ 검색: q로 searchKey(* 제거 버전)와 비교
         var results=q.isEmpty?all:all.where((a)=>a.searchKey.contains(q)||a.word.contains(q)).toList();
         if(_showFavOnly)results=results.where((a)=>a.isFavorite).toList();
+        if(_selectedGroupId != null)results=results.where((a)=>a.groupId == _selectedGroupId).toList();
 
         return Scaffold(
           backgroundColor:Colors.white,
@@ -1026,6 +1042,25 @@ class _SearchScreenState extends State<SearchScreen> {
                     const SizedBox(width:4),
                     Text('즐겨찾기',style:TextStyle(fontSize:12,fontWeight:FontWeight.w600,
                         color:_showFavOnly?const Color(0xFFB8860B):Colors.grey)),
+                  ]),
+                ),
+              ),
+              
+GestureDetector(
+                onTap:()=>_showGroupFilterDialog(context),
+                child:Container(
+                  padding:const EdgeInsets.symmetric(horizontal:10,vertical:6),
+                  margin:const EdgeInsets.only(right:8),
+                  decoration:BoxDecoration(
+                    color:_selectedGroupId != null ? Color(Store.getGroups().firstWhere((g)=>g.id==_selectedGroupId).colorValue).withOpacity(0.15) : kBlueLight,
+                    borderRadius:BorderRadius.circular(20),
+                    border:Border.all(color:_selectedGroupId != null ? Color(Store.getGroups().firstWhere((g)=>g.id==_selectedGroupId).colorValue) : Colors.transparent, width:1.2)),
+                  child:Row(mainAxisSize:MainAxisSize.min,children:[
+                    Icon(Icons.folder_rounded,size:16,color:_selectedGroupId != null ? Color(Store.getGroups().firstWhere((g)=>g.id==_selectedGroupId).colorValue) : Colors.grey),
+                    const SizedBox(width:4),
+                    Text(_selectedGroupId != null ? Store.getGroups().firstWhere((g)=>g.id==_selectedGroupId).name : '그룹',
+                        style:TextStyle(fontSize:12,fontWeight:FontWeight.w600,
+                        color:_selectedGroupId != null ? Color(Store.getGroups().firstWhere((g)=>g.id==_selectedGroupId).colorValue) : Colors.grey)),
                   ]),
                 ),
               ),
@@ -1076,6 +1111,86 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  
+  void _showGroupFilterDialog(BuildContext context) {
+    showDialog(context:context, builder:(ctx)=>AlertDialog(
+      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
+      title:Row(mainAxisAlignment:MainAxisAlignment.spaceBetween, children:[
+        const Text('그룹 선택', style:TextStyle(fontSize:16, fontWeight:FontWeight.w700)),
+        TextButton(onPressed:()=>_showGroupManageDialog(context), child:const Text('관리', style:TextStyle(color:kBlue))),
+      ]),
+      content:SizedBox(width:double.maxFinite, child:ValueListenableBuilder(
+        valueListenable: Hive.box('groups').listenable(),
+        builder: (context, box, _) {
+          final groups = Store.getGroups();
+          return ListView(shrinkWrap:true, children:[
+            ListTile(title:const Text('전체보기'), leading:const Icon(Icons.all_inclusive), 
+                onTap:(){setState(()=>_selectedGroupId=null); Navigator.pop(ctx);}),
+            ...groups.map((g)=>ListTile(
+              leading:CircleAvatar(backgroundColor:Color(g.colorValue), radius:8),
+              title:Text(g.name),
+              onTap:(){setState(()=>_selectedGroupId=g.id); Navigator.pop(ctx);},
+            )),
+          ]);
+        }
+      )),
+    ));
+  }
+
+  void _showGroupManageDialog(BuildContext context) {
+    showDialog(context:context, builder:(ctx)=>AlertDialog(
+      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
+      title:const Text('그룹 관리', style:TextStyle(fontSize:16, fontWeight:FontWeight.w700)),
+      content:SizedBox(width:double.maxFinite, child:ValueListenableBuilder(
+        valueListenable: Hive.box('groups').listenable(),
+        builder: (context, box, _) {
+          final groups = Store.getGroups();
+          return ListView(shrinkWrap:true, children:[
+            ...groups.map((g)=>ListTile(
+              leading:CircleAvatar(backgroundColor:Color(g.colorValue), radius:8),
+              title:Text(g.name),
+              trailing:IconButton(icon:const Icon(Icons.delete_outline, color:Colors.red, size:20), 
+                  onPressed:()=>Store.deleteGroup(g.id)),
+              onTap:()=>_showAddGroupDialog(context, existing:g),
+            )),
+            ListTile(leading:const Icon(Icons.add), title:const Text('새 그룹 추가'), 
+                onTap:()=>_showAddGroupDialog(context)),
+          ]);
+        }
+      )),
+      actions:[TextButton(onPressed:()=>Navigator.pop(ctx), child:const Text('닫기'))],
+    ));
+  }
+
+  void _showAddGroupDialog(BuildContext context, {GroupModel? existing}) {
+    final nameCtrl = TextEditingController(text:existing?.name ?? '');
+    int selectedColor = existing?.colorValue ?? kBlue.value;
+    final colors = [kBlue.value, kBlueSky.value, kPurple.value, Colors.red.value, Colors.orange.value, Colors.green.value, Colors.teal.value, Colors.brown.value];
+    
+    showDialog(context:context, builder:(ctx)=>StatefulBuilder(builder:(ctx, setS)=>AlertDialog(
+      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
+      title:Text(existing==null?'새 그룹 추가':'그룹 수정'),
+      content:Column(mainAxisSize:MainAxisSize.min, children:[
+        TextField(controller:nameCtrl, decoration:_inputDeco('그룹 이름')),
+        const SizedBox(height:16),
+        Wrap(spacing:8, runSpacing:8, children:colors.map((c)=>GestureDetector(
+          onTap:()=>setS(()=>selectedColor=c),
+          child:CircleAvatar(backgroundColor:Color(c), radius:15, 
+              child:selectedColor==c?const Icon(Icons.check, color:Colors.white, size:18):null),
+        )).toList()),
+      ]),
+      actions:[
+        TextButton(onPressed:()=>Navigator.pop(ctx), child:const Text('취소')),
+        ElevatedButton(onPressed:()async{
+          if(nameCtrl.text.trim().isEmpty) return;
+          await Store.saveGroup(GroupModel(id:existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(), 
+              name:nameCtrl.text.trim(), colorValue:selectedColor));
+          Navigator.pop(ctx);
+        }, style:ElevatedButton.styleFrom(backgroundColor:kBlue, foregroundColor:Colors.white), child:const Text('저장')),
+      ],
+    )));
+  }
+
   void _showEditDialog(BuildContext context,{AbbreviationModel? existing}){
     // 수정 시 * → 공백으로 복원해서 입력창에 표시
     final wordCtrl=TextEditingController(text:existing?.word.replaceAll('*',' ')??'');
@@ -1092,11 +1207,38 @@ class _SearchScreenState extends State<SearchScreen> {
     bool isConcurrent=existing?.isConcurrent??false;
     bool isAttached=existing?.isAttached??false;
     bool isFavorite=existing?.isFavorite??false;
+    String? selectedGroupId=existing?.groupId;
 
     showDialog(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setS)=>AlertDialog(
       shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
       title:Text(existing==null?'약어 추가':'약어 수정',style:const TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
       content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.start,children:[
+        
+        _lbl('그룹 선택'),
+        ValueListenableBuilder(
+          valueListenable: Hive.box('groups').listenable(),
+          builder: (context, box, _) {
+            final groups = Store.getGroups();
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              decoration: BoxDecoration(borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFE0E0E0))),
+              child: DropdownButtonHideUnderline(child: DropdownButton<String?>(
+                value: selectedGroupId, isExpanded: true, hint: const Text('그룹 없음', style: TextStyle(fontSize: 13)),
+                items: [
+                  const DropdownMenuItem<String?>(value: null, child: Text('그룹 없음', style: TextStyle(fontSize: 13))),
+                  ...groups.map((g) => DropdownMenuItem<String?>(value: g.id, child: Row(children: [
+                    CircleAvatar(backgroundColor: Color(g.colorValue), radius: 6),
+                    const SizedBox(width: 8),
+                    Text(g.name, style: const TextStyle(fontSize: 13)),
+                  ]))),
+                ],
+                onChanged: (v) => setS(() => selectedGroupId = v),
+              )),
+            );
+          },
+        ),
+        const SizedBox(height: 12),
+
         _lbl('단어'),
         TextField(controller:wordCtrl,decoration:_inputDeco('')),
         const SizedBox(height:4),
@@ -1169,7 +1311,7 @@ class _SearchScreenState extends State<SearchScreen> {
                   ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
                       onPressed:()=>Navigator.pop(c2,true),child:const Text('저장')),
                 ]));
-              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite);
+              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite,selectedGroupId);
             }else{
               final confirm=await showDialog<bool>(context:context,builder:(c2)=>AlertDialog(
                 shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
@@ -1180,7 +1322,7 @@ class _SearchScreenState extends State<SearchScreen> {
                   ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
                       onPressed:()=>Navigator.pop(c2,true),child:const Text('저장')),
                 ]));
-              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite);
+              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite,selectedGroupId);
             }
           },
           child:const Text('다음')),
@@ -1188,12 +1330,11 @@ class _SearchScreenState extends State<SearchScreen> {
     )));
   }
 
-  Future<void> _doSave(AbbreviationModel? existing,String word,List<String> init,List<String> med,List<String> fin,
-      bool isComposite,bool isConcurrent,bool isAttached,bool isFavorite)async{
+  Future<void> _doSave(AbbreviationModel? existing,String word,List<String> init,List<String> med,List<String> fin, bool isComposite,bool isConcurrent,bool isAttached,bool isFavorite, String? groupId)async{
     await Store.saveAbbreviation(AbbreviationModel(
       id:existing?.id??DateTime.now().millisecondsSinceEpoch.toString(),
       word:word,initial:init,medial:med,final_:fin,
-      isComposite:isComposite,isConcurrent:isConcurrent,isAttached:isAttached,isFavorite:isFavorite));
+      isComposite:isComposite,isConcurrent:isConcurrent,isAttached:isAttached,isFavorite:isFavorite,groupId:groupId));
   }
 
   void _confirmDelete(BuildContext context,AbbreviationModel a){
@@ -1371,7 +1512,19 @@ class _AbbrTile extends StatelessWidget {
         if(abbr.isAttached)const Text('↙ ',style:TextStyle(fontSize:14,color:kBlueDark,fontWeight:FontWeight.w700)),
         // ★ displayWord (* 포함) 로 표시
         Text(abbr.displayWord,style:TextStyle(color:abbr.typeColor,fontWeight:FontWeight.w700,fontSize:15)),
-        if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12)),
+        if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12));
+
+          if(abbr.groupId != null && Store.getGroups().any((g)=>g.id==abbr.groupId)) ...[
+            const SizedBox(width: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: Color(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).colorValue).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8)),
+              child: Text(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).name, 
+                  style: TextStyle(fontSize: 10, color: Color(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).colorValue), fontWeight: FontWeight.w700))),
+          ],
+
         if(abbr.typeLabel.isNotEmpty)Container(
           margin:const EdgeInsets.only(left:6),
           padding:const EdgeInsets.symmetric(horizontal:6,vertical:1),
@@ -1399,7 +1552,19 @@ class _AbbrListTile extends StatelessWidget {
           if(abbr.isAttached)const Text('↙ ',style:TextStyle(fontSize:14,color:kBlueDark,fontWeight:FontWeight.w700)),
           // ★ displayWord (* 포함) 로 표시
           Text(abbr.displayWord,style:TextStyle(color:abbr.typeColor,fontWeight:FontWeight.w700,fontSize:15)),
-          if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12)),
+          if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12));
+
+          if(abbr.groupId != null && Store.getGroups().any((g)=>g.id==abbr.groupId)) ...[
+            const SizedBox(width: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(
+                color: Color(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).colorValue).withOpacity(0.15),
+                borderRadius: BorderRadius.circular(8)),
+              child: Text(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).name, 
+                  style: TextStyle(fontSize: 10, color: Color(Store.getGroups().firstWhere((g)=>g.id==abbr.groupId).colorValue), fontWeight: FontWeight.w700))),
+          ],
+
           if(abbr.typeLabel.isNotEmpty)Container(
             margin:const EdgeInsets.only(left:6),
             padding:const EdgeInsets.symmetric(horizontal:6,vertical:1),
