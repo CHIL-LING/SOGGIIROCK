@@ -27,27 +27,15 @@ const Color kTimerBg     = Color(0xFFBED3F7);
 // ════════════════════════════════════════════════════════
 // 띄어쓰기 변환 유틸
 // ════════════════════════════════════════════════════════
-
-/// 단어를 저장용으로 변환: 모든 공백을 * 로 바꾸고
-/// 단어 자체가 공백으로 시작/끝나면 앞뒤에도 * 추가
-/// 예: " 가 나 다 " → "*가*나*다*"
-String encodeWord(String raw) {
-  // 먼저 공백을 * 로 치환
-  return raw.replaceAll(' ', '*');
-}
-
-/// 저장된 단어에서 * 제거 → 검색용 키워드
-/// 예: "*가*나*다*" → "가나다"
-String decodeWordForSearch(String word) {
-  return word.replaceAll('*', '');
-}
+String encodeWord(String raw) => raw.replaceAll(' ', '*');
+String decodeWordForSearch(String word) => word.replaceAll('*', '');
 
 // ════════════════════════════════════════════════════════
 // 데이터 모델
 // ════════════════════════════════════════════════════════
 class AbbreviationModel {
   final String id;
-  final String word;       // * 포함 저장형
+  final String word;
   final List<String> initial;
   final List<String> medial;
   final List<String> final_;
@@ -68,10 +56,7 @@ class AbbreviationModel {
     this.isFavorite   = false,
   });
 
-  /// 검색용: * 없는 순수 텍스트
   String get searchKey => decodeWordForSearch(word);
-
-  /// 화면 표시용: * 포함 (약어 목록/추출 화면)
   String get displayWord => word;
 
   Map<String, dynamic> toMap() => {
@@ -121,12 +106,17 @@ class AbbreviationModel {
     return parts.join(' / ');
   }
 
-  String get typeLabel {
-    if (isConcurrent) return '동시';
-    if (isComposite)  return '합성';
-    if (isAttached)   return '붙여쓰기';
-    return '';
+  // ★ 1번 수정: 모든 타입 레이블을 리스트로 반환 (우선순위 없이 전부 표시)
+  List<String> get typeLabels {
+    final labels = <String>[];
+    if (isConcurrent) labels.add('동시');
+    if (isComposite)  labels.add('합성');
+    if (isAttached)   labels.add('붙여쓰기');
+    return labels;
   }
+
+  // 기존 호환성 유지
+  String get typeLabel => typeLabels.join('/');
 
   Color get typeColor {
     if (isConcurrent) return kPurple;
@@ -218,7 +208,6 @@ class Store {
   static Future<void> saveAbbreviation(AbbreviationModel a) => _ab.put(a.id, a.toMap());
   static Future<void> deleteAbbreviation(String id) => _ab.delete(id);
 
-  /// 중복 체크: * 제거한 순수 단어로 비교
   static bool existsWord(String word, {String? excludeId}) {
     final key = decodeWordForSearch(word);
     return getAbbreviations().any((a) =>
@@ -278,9 +267,7 @@ class StudyTimer extends ChangeNotifier {
   void start() {
     if (_running) return;
     _running = true;
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      _seconds++; notifyListeners();
-    });
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) { _seconds++; notifyListeners(); });
     notifyListeners();
   }
   void pause() { _running = false; _timer?.cancel(); notifyListeners(); }
@@ -314,10 +301,6 @@ class _Span {
   const _Span({required this.text, required this.type, this.abbr});
 }
 
-/// 문장 분석:
-/// - 입력 문장을 * 변환 버전으로 약어 매칭
-/// - 약어 부분: word 그대로 (* 포함) 표시
-/// - 일반 부분: * → 공백 복원해서 표시
 List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   final normalized = raw.replaceAll(' ', '*');
   List<_Span> parts = [_Span(text: normalized, type: 'normal')];
@@ -339,11 +322,8 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
     }
     parts = next;
   }
-  // 일반 텍스트만 * → 공백 복원
   return parts.map((p) {
-    if (p.type == 'normal') {
-      return _Span(text: p.text.replaceAll('*', ' '), type: 'normal');
-    }
+    if (p.type == 'normal') return _Span(text: p.text.replaceAll('*', ' '), type: 'normal');
     return p;
   }).toList();
 }
@@ -409,8 +389,11 @@ class MainShell extends StatefulWidget {
 class _MainShellState extends State<MainShell> {
   int _idx = 0;
   final _screens = [
-    const HomeScreen(), const SentenceAnalyzerScreen(), const SearchScreen(),
-    const SentenceRegisterScreen(), const RemindersScreen(),
+    const HomeScreen(),
+    const SentenceAnalyzerScreen(),
+    const SearchScreen(),
+    const SentenceRegisterScreen(),
+    const RemindersScreen(),
   ];
   @override
   Widget build(BuildContext context) => Scaffold(
@@ -514,6 +497,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
             const SizedBox(height: 8),
 
+            // ★ 6번: 달력 - 작은 동그라미로 변경
             Center(
               child: SizedBox(
                 width: calW,
@@ -536,19 +520,39 @@ class _HomeScreenState extends State<HomeScreen> {
                       final isSel  = key == _selected;
                       return GestureDetector(
                         onTap: () => setState(() => _selected = key),
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: isSel ? kBlue : marked ? kBlueSky.withOpacity(0.18) : Colors.transparent,
-                            borderRadius: BorderRadius.circular(10),
-                            boxShadow: marked && !isSel ? [
-                              BoxShadow(color: kBlueSky.withOpacity(0.25), blurRadius: 6, spreadRadius: 1)
-                            ] : null,
-                          ),
-                          child: Center(child: Text('$day', style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: isSel || marked ? FontWeight.w700 : FontWeight.w400,
-                            color: isSel ? Colors.white : marked ? kBlueDark : Colors.black87,
-                          ))),
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // 선택된 날 배경
+                            if (isSel)
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: kBlue,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                              ),
+                            // ★ 기록 있는 날: 숫자 크기의 흐린 동그라미
+                            if (marked && !isSel)
+                              Container(
+                                width: 28, height: 28,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: kBlueSky.withOpacity(0.45),
+                                      blurRadius: 8,
+                                      spreadRadius: 4,
+                                    ),
+                                  ],
+                                  color: kBlueSky.withOpacity(0.25),
+                                ),
+                              ),
+                            Text('$day', style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: isSel || marked ? FontWeight.w700 : FontWeight.w400,
+                              color: isSel ? Colors.white : marked ? kBlueDark : Colors.black87,
+                            )),
+                          ],
                         ),
                       );
                     },
@@ -884,95 +888,115 @@ class _PB extends StatelessWidget {
 
 // ════════════════════════════════════════════════════════
 // 문장 내 약어 추출
+// ★ 5번: 탭 이동해도 텍스트 유지 (전역 컨트롤러 사용)
 // ════════════════════════════════════════════════════════
+final _analyzerCtrl = TextEditingController();
+bool _analyzerAnalyzed = false;
+
 class SentenceAnalyzerScreen extends StatefulWidget {
   const SentenceAnalyzerScreen({super.key});
   @override State<SentenceAnalyzerScreen> createState() => _SentenceAnalyzerScreenState();
 }
 class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
-  final _ctrl=TextEditingController();
-  final _focusNode=FocusNode();
-  bool _analyzed=false;
-  @override void dispose(){_ctrl.dispose();_focusNode.dispose();super.dispose();}
+  final _focusNode = FocusNode();
+
+  @override
+  void dispose() { _focusNode.dispose(); super.dispose(); }
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
       valueListenable: Hive.box('abbreviations').listenable(),
       builder: (context, box, _) {
-        final abbrevs=Store.getAbbreviations();
-        final text=_ctrl.text;
-        final parts=_analyzed?analyzeText(text,abbrevs):<_Span>[];
-        final found=_analyzed?parts.where((p)=>p.type!='normal').map((p)=>p.abbr!).toSet().toList():<AbbreviationModel>[];
+        final abbrevs = Store.getAbbreviations();
+        final text    = _analyzerCtrl.text;
+        final parts   = _analyzerAnalyzed ? analyzeText(text, abbrevs) : <_Span>[];
+        final found   = _analyzerAnalyzed
+            ? parts.where((p) => p.type != 'normal').map((p) => p.abbr!).toSet().toList()
+            : <AbbreviationModel>[];
 
         return GestureDetector(
-          onTap:()=>FocusScope.of(context).requestFocus(_focusNode),
-          child:Scaffold(
-            backgroundColor:Colors.white,
-            resizeToAvoidBottomInset:true,
-            body:SafeArea(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-              const Padding(padding:EdgeInsets.fromLTRB(20,20,20,12),
-                  child:Text('문장 내 약어 추출',style:TextStyle(fontSize:18,fontWeight:FontWeight.w900))),
-              Expanded(child:SingleChildScrollView(
-                keyboardDismissBehavior:ScrollViewKeyboardDismissBehavior.manual,
-                padding:const EdgeInsets.symmetric(horizontal:16),
-                child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-                  TextField(controller:_ctrl,focusNode:_focusNode,maxLines:4,
-                    onChanged:(_)=>setState(()=>_analyzed=false),
-                    decoration:InputDecoration(
-                      hintText:'분석할 문장을 입력하세요...',
-                      border:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:Color(0xFFE0E0E0))),
-                      focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:kBlue)),
-                    )),
-                  const SizedBox(height:10),
-                  SizedBox(width:double.infinity,child:ElevatedButton(
-                    onPressed:()=>setState(()=>_analyzed=true),
-                    style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white,
-                        padding:const EdgeInsets.symmetric(vertical:14),
-                        shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12))),
-                    child:const Text('약어 분석하기',style:TextStyle(fontSize:15,fontWeight:FontWeight.w700)))),
-                  if(_analyzed&&text.isEmpty)
-                    const Padding(padding:EdgeInsets.only(top:16),
-                        child:Center(child:Text('문장을 먼저 입력해 주세요.',style:TextStyle(color:Colors.grey)))),
-                  if(_analyzed&&text.isNotEmpty)...[
-                    const SizedBox(height:16),
-                    Wrap(spacing:12,runSpacing:6,children:[
-                      _Leg(color:kBlue,label:'일반 약어'),
-                      _Leg(color:kBlueSky,label:'합성약어'),
-                      _Leg(color:kPurple,label:'동시처리약어'),
-                      const Text('⭐ 즐겨찾기',style:TextStyle(fontSize:11,color:Colors.grey)),
+          onTap: () => FocusScope.of(context).requestFocus(_focusNode),
+          child: Scaffold(
+            backgroundColor: Colors.white,
+            resizeToAvoidBottomInset: true,
+            body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Padding(padding: EdgeInsets.fromLTRB(20,20,20,12),
+                  child: Text('문장 내 약어 추출',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
+              Expanded(child: SingleChildScrollView(
+                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  TextField(
+                    controller: _analyzerCtrl,
+                    focusNode: _focusNode,
+                    maxLines: 4,
+                    onChanged: (_) => setState(() => _analyzerAnalyzed = false),
+                    decoration: InputDecoration(
+                      hintText: '분석할 문장을 입력하세요...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(color: kBlue)),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  SizedBox(width: double.infinity, child: ElevatedButton(
+                    onPressed: () => setState(() => _analyzerAnalyzed = true),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kBlue, foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                    child: const Text('약어 분석하기',
+                        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                  )),
+                  if (_analyzerAnalyzed && text.isEmpty)
+                    const Padding(padding: EdgeInsets.only(top: 16),
+                        child: Center(child: Text('문장을 먼저 입력해 주세요.',
+                            style: TextStyle(color: Colors.grey)))),
+                  if (_analyzerAnalyzed && text.isNotEmpty) ...[
+                    const SizedBox(height: 16),
+                    Wrap(spacing: 12, runSpacing: 6, children: [
+                      _Leg(color: kBlue,    label: '일반 약어'),
+                      _Leg(color: kBlueSky, label: '합성약어'),
+                      _Leg(color: kPurple,  label: '동시처리약어'),
+                      const Text('⭐ 즐겨찾기', style: TextStyle(fontSize: 11, color: Colors.grey)),
                     ]),
-                    const SizedBox(height:8),
+                    const SizedBox(height: 8),
                     Container(
-                      width:double.infinity,padding:const EdgeInsets.all(14),
-                      decoration:BoxDecoration(color:const Color(0xFFF8F9FF),
-                          borderRadius:BorderRadius.circular(12),border:Border.all(color:kBlueLight)),
-                      child:SelectableText.rich(TextSpan(children:parts.map((p){
-                        Color color=Colors.black87;FontWeight fw=FontWeight.w400;
-                        if(p.type=='abbr'){color=kBlue;fw=FontWeight.w700;}
-                        if(p.type=='composite'){color=kBlueSky;fw=FontWeight.w700;}
-                        if(p.type=='concurrent'){color=kPurple;fw=FontWeight.w700;}
-                        String display=p.text;
-                        if(p.abbr!=null&&p.abbr!.isFavorite)display='$display⭐';
-                        return TextSpan(text:display,
-                            style:TextStyle(fontSize:16,color:color,fontWeight:fw,height:1.8));
-                      }).toList()))),
-                    if(found.isNotEmpty)...[
-                      const SizedBox(height:14),
-                      Row(mainAxisAlignment:MainAxisAlignment.spaceBetween,children:[
+                      width: double.infinity, padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: kBlueLight)),
+                      child: SelectableText.rich(TextSpan(children: parts.map((p) {
+                        Color color = Colors.black87; FontWeight fw = FontWeight.w400;
+                        if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
+                        if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
+                        if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
+                        String display = p.text;
+                        if (p.abbr != null && p.abbr!.isFavorite) display = '$display⭐';
+                        return TextSpan(text: display,
+                            style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
+                      }).toList())),
+                    ),
+                    if (found.isNotEmpty) ...[
+                      const SizedBox(height: 14),
+                      Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                         Text('사용된 약어 (${found.length}개)',
-                            style:const TextStyle(fontSize:13,fontWeight:FontWeight.w700,color:Colors.grey)),
-                        IconButton(icon:const Icon(Icons.copy,size:16,color:Colors.grey),
-                          onPressed:(){
-                            final t=found.map((a)=>'${a.displayWord}: ${a.strokeDisplay}').join('\n');
-                            Clipboard.setData(ClipboardData(text:t));
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.grey)),
+                        IconButton(icon: const Icon(Icons.copy, size: 16, color: Colors.grey),
+                          onPressed: () {
+                            final t = found.map((a) => '${a.displayWord}: ${a.strokeDisplay}').join('\n');
+                            Clipboard.setData(ClipboardData(text: t));
                             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                                content:Text('약어 목록이 복사되었습니다'),backgroundColor:kBlue,
-                                duration:Duration(seconds:1)));
+                                content: Text('약어 목록이 복사되었습니다'),
+                                backgroundColor: kBlue,
+                                duration: Duration(seconds: 1)));
                           }),
                       ]),
-                      const SizedBox(height:4),
-                      ...found.map((a)=>_AbbrTile(abbr:a)),
+                      const SizedBox(height: 4),
+                      ...found.map((a) => _AbbrTile(abbr: a)),
                     ],
                   ],
                 ]),
@@ -993,81 +1017,96 @@ class SearchScreen extends StatefulWidget {
   @override State<SearchScreen> createState() => _SearchScreenState();
 }
 class _SearchScreenState extends State<SearchScreen> {
-  final _ctrl=TextEditingController();
-  bool _showFavOnly=false;
+  final _ctrl = TextEditingController();
+  bool _showFavOnly = false;
 
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
       valueListenable: Hive.box('abbreviations').listenable(),
       builder: (context, box, _) {
-        final q=_ctrl.text.trim();
-        final all=Store.getAbbreviations();
-        // ★ 검색: q로 searchKey(* 제거 버전)와 비교
-        var results=q.isEmpty?all:all.where((a)=>a.searchKey.contains(q)||a.word.contains(q)).toList();
-        if(_showFavOnly)results=results.where((a)=>a.isFavorite).toList();
+        final q   = _ctrl.text.trim();
+        final all = Store.getAbbreviations();
+        // ★ 9번: 띄어쓰기, *, 공백 제거 모두 허용
+        var results = q.isEmpty ? all : all.where((a) {
+          final qNorm = q.replaceAll(' ', '').replaceAll('*', '');
+          final wNorm = a.searchKey.replaceAll(' ', '');
+          return wNorm.contains(qNorm) || a.word.contains(q) || a.searchKey.contains(q);
+        }).toList();
+        if (_showFavOnly) results = results.where((a) => a.isFavorite).toList();
 
         return Scaffold(
-          backgroundColor:Colors.white,
-          body:SafeArea(child:Column(children:[
-            Padding(padding:const EdgeInsets.fromLTRB(20,20,20,12),child:Row(children:[
-              const Expanded(child:Text('약어 검색',style:TextStyle(fontSize:18,fontWeight:FontWeight.w900))),
+          backgroundColor: Colors.white,
+          body: SafeArea(child: Column(children: [
+            Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12), child: Row(children: [
+              const Expanded(child: Text('약어 검색',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
               GestureDetector(
-                onTap:()=>setState(()=>_showFavOnly=!_showFavOnly),
-                child:Container(
-                  padding:const EdgeInsets.symmetric(horizontal:10,vertical:6),
-                  margin:const EdgeInsets.only(right:8),
-                  decoration:BoxDecoration(
-                    color:_showFavOnly?const Color(0xFFFFD700).withOpacity(0.15):kBlueLight,
-                    borderRadius:BorderRadius.circular(20),
-                    border:Border.all(color:_showFavOnly?const Color(0xFFFFD700):Colors.transparent,width:1.2)),
-                  child:Row(mainAxisSize:MainAxisSize.min,children:[
-                    Icon(Icons.star_rounded,size:16,color:_showFavOnly?const Color(0xFFFFD700):Colors.grey),
-                    const SizedBox(width:4),
-                    Text('즐겨찾기',style:TextStyle(fontSize:12,fontWeight:FontWeight.w600,
-                        color:_showFavOnly?const Color(0xFFB8860B):Colors.grey)),
+                onTap: () => setState(() => _showFavOnly = !_showFavOnly),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: _showFavOnly ? const Color(0xFFFFD700).withOpacity(0.15) : kBlueLight,
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                        color: _showFavOnly ? const Color(0xFFFFD700) : Colors.transparent,
+                        width: 1.2)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.star_rounded, size: 16,
+                        color: _showFavOnly ? const Color(0xFFFFD700) : Colors.grey),
+                    const SizedBox(width: 4),
+                    Text('즐겨찾기', style: TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600,
+                        color: _showFavOnly ? const Color(0xFFB8860B) : Colors.grey)),
                   ]),
                 ),
               ),
               ElevatedButton.icon(
-                onPressed:()=>_showEditDialog(context),
-                icon:const Icon(Icons.add,size:16),label:const Text('추가'),
-                style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white,
-                    shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20)),
-                    padding:const EdgeInsets.symmetric(horizontal:14,vertical:6))),
+                onPressed: () => _showEditDialog(context),
+                icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kBlue, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
             ])),
-            Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:TextField(
-              controller:_ctrl,onChanged:(_)=>setState((){}),
-              decoration:InputDecoration(
-                hintText:'단어로 검색하세요...',
-                prefixIcon:const Icon(Icons.search,color:Colors.grey),
-                border:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:Color(0xFFE0E0E0))),
-                focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:kBlue)),
+            Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: TextField(
+              controller: _ctrl, onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                hintText: '단어로 검색하세요...',
+                prefixIcon: const Icon(Icons.search, color: Colors.grey),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: kBlue)),
               ))),
-            const SizedBox(height:8),
-            Expanded(child:results.isEmpty
-              ?Center(child:Column(mainAxisAlignment:MainAxisAlignment.center,children:[
-                  Text(_showFavOnly?'즐겨찾기한 약어가 없습니다':'약어가 없습니다',
-                      style:const TextStyle(color:Colors.grey,fontSize:14)),
-                  if(!_showFavOnly)...[
-                    const SizedBox(height:12),
-                    OutlinedButton(onPressed:()=>_showEditDialog(context),
-                      style:OutlinedButton.styleFrom(foregroundColor:kBlue,side:const BorderSide(color:kBlue),
-                          shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(20))),
-                      child:const Text('약어 추가하기',style:TextStyle(fontWeight:FontWeight.w700))),
+            const SizedBox(height: 8),
+            Expanded(child: results.isEmpty
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Text(_showFavOnly ? '즐겨찾기한 약어가 없습니다' : '약어가 없습니다',
+                      style: const TextStyle(color: Colors.grey, fontSize: 14)),
+                  if (!_showFavOnly) ...[
+                    const SizedBox(height: 12),
+                    OutlinedButton(
+                      onPressed: () => _showEditDialog(context),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: kBlue, side: const BorderSide(color: kBlue),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+                      child: const Text('약어 추가하기',
+                          style: TextStyle(fontWeight: FontWeight.w700))),
                   ]]))
-              :ListView.builder(
-                  keyboardDismissBehavior:ScrollViewKeyboardDismissBehavior.manual,
-                  padding:const EdgeInsets.symmetric(horizontal:16),
-                  itemCount:results.length,
-                  itemBuilder:(context,index){
-                    final a=results[index];
+              : ListView.builder(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: results.length,
+                  itemBuilder: (context, index) {
+                    final a = results[index];
                     return _AbbrListTile(
-                      abbr:a,
-                      onFav:()async{await Store.saveAbbreviation(a.copyWith(isFavorite:!a.isFavorite));},
-                      onEdit:()=>_showEditDialog(context,existing:a),
-                      onDelete:()=>_confirmDelete(context,a),
-                      onRemind:()=>_showReminderDialog(context,a.word,'word'),
+                      abbr: a,
+                      onFav: () async { await Store.saveAbbreviation(a.copyWith(isFavorite: !a.isFavorite)); },
+                      onEdit: () => _showEditDialog(context, existing: a),
+                      onDelete: () => _confirmDelete(context, a),
+                      onRemind: () => _showReminderDialog(context, a.word, 'word'),
                     );
                   })),
           ])),
@@ -1076,136 +1115,177 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  void _showEditDialog(BuildContext context,{AbbreviationModel? existing}){
-    // 수정 시 * → 공백으로 복원해서 입력창에 표시
-    final wordCtrl=TextEditingController(text:existing?.word.replaceAll('*',' ')??'');
-    final i1=TextEditingController(text:existing?.initial.elementAtOrNull(0)??'');
-    final i2=TextEditingController(text:existing?.initial.elementAtOrNull(1)??'');
-    final i3=TextEditingController(text:existing?.initial.elementAtOrNull(2)??'');
-    final m1=TextEditingController(text:existing?.medial.elementAtOrNull(0)??'');
-    final m2=TextEditingController(text:existing?.medial.elementAtOrNull(1)??'');
-    final m3=TextEditingController(text:existing?.medial.elementAtOrNull(2)??'');
-    final f1=TextEditingController(text:existing?.final_.elementAtOrNull(0)??'');
-    final f2=TextEditingController(text:existing?.final_.elementAtOrNull(1)??'');
-    final f3=TextEditingController(text:existing?.final_.elementAtOrNull(2)??'');
-    bool isComposite=existing?.isComposite??false;
-    bool isConcurrent=existing?.isConcurrent??false;
-    bool isAttached=existing?.isAttached??false;
-    bool isFavorite=existing?.isFavorite??false;
+  // ★ 4번: 초중종 칸을 하나로 통합 (+ 구분자로 여러 값 입력)
+  // ★ 2번: 엔터로 저장
+  // ★ 3번: 팝업 뒤 스크롤 가능 (barrierColor 투명도 조정)
+  void _showEditDialog(BuildContext context, {AbbreviationModel? existing}) {
+    final wordCtrl    = TextEditingController(text: existing?.word.replaceAll('*', ' ') ?? '');
+    // 초중종을 하나의 TextField로 통합 (+로 구분)
+    final initialCtrl = TextEditingController(
+        text: existing?.initial.isNotEmpty == true ? existing!.initial.join('+') : '');
+    final medialCtrl  = TextEditingController(
+        text: existing?.medial.isNotEmpty == true ? existing!.medial.join('+') : '');
+    final finalCtrl   = TextEditingController(
+        text: existing?.final_.isNotEmpty == true ? existing!.final_.join('+') : '');
+    bool isComposite  = existing?.isComposite  ?? false;
+    bool isConcurrent = existing?.isConcurrent ?? false;
+    bool isAttached   = existing?.isAttached   ?? false;
+    bool isFavorite   = existing?.isFavorite   ?? false;
 
-    showDialog(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setS)=>AlertDialog(
-      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-      title:Text(existing==null?'약어 추가':'약어 수정',style:const TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-      content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.start,children:[
-        _lbl('단어'),
-        TextField(controller:wordCtrl,decoration:_inputDeco('')),
-        const SizedBox(height:4),
-        Text('※ 띄어쓰기는 저장 시 * 로 자동 변환됩니다',
-            style:TextStyle(fontSize:10,color:Colors.grey.shade500)),
-        const SizedBox(height:12),
-        _lbl('초성'),
-        Row(children:[
-          Expanded(child:TextField(controller:i1,decoration:_inputDeco('1'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:i2,decoration:_inputDeco('2'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:i3,decoration:_inputDeco('3'))),
-        ]),
-        const SizedBox(height:12),
-        _lbl('중성'),
-        Row(children:[
-          Expanded(child:TextField(controller:m1,decoration:_inputDeco('1'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:m2,decoration:_inputDeco('2'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:m3,decoration:_inputDeco('3'))),
-        ]),
-        const SizedBox(height:12),
-        _lbl('종성'),
-        Row(children:[
-          Expanded(child:TextField(controller:f1,decoration:_inputDeco('1'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:f2,decoration:_inputDeco('2'))),const SizedBox(width:6),
-          Expanded(child:TextField(controller:f3,decoration:_inputDeco('3'))),
-        ]),
-        const SizedBox(height:4),
-        Text('※ 종성 ㅋ → 자동으로 (ㅋ) 표시',style:TextStyle(fontSize:10,color:Colors.grey.shade500)),
-        const SizedBox(height:12),
-        Wrap(spacing:0,runSpacing:4,children:[
-          Row(mainAxisSize:MainAxisSize.min,children:[
-            Checkbox(value:isComposite,activeColor:kBlueSky,onChanged:(v)=>setS(()=>isComposite=v??false)),
-            const Text('합성약어',style:TextStyle(fontSize:13)),
-          ]),
-          Row(mainAxisSize:MainAxisSize.min,children:[
-            Checkbox(value:isConcurrent,activeColor:kPurple,onChanged:(v)=>setS(()=>isConcurrent=v??false)),
-            const Text('동시처리',style:TextStyle(fontSize:13)),
-          ]),
-          Row(mainAxisSize:MainAxisSize.min,children:[
-            Checkbox(value:isAttached,activeColor:kBlueDark,onChanged:(v)=>setS(()=>isAttached=v??false)),
-            const Text('붙여쓰기',style:TextStyle(fontSize:13)),
-          ]),
-          Row(mainAxisSize:MainAxisSize.min,children:[
-            Checkbox(value:isFavorite,activeColor:kBlue,onChanged:(v)=>setS(()=>isFavorite=v??false)),
-            const Text('즐겨찾기',style:TextStyle(fontSize:13)),
-          ]),
-        ]),
-      ])),
-      actions:[
-        TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-        ElevatedButton(
-          style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white,
-              shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(8))),
-          onPressed:()async{
-            final rawWord=wordCtrl.text.trim();
-            if(rawWord.isEmpty)return;
-            // ★ 저장 시 공백 → * 변환
-            final word=encodeWord(rawWord);
-            List<String> gl(List<TextEditingController> cs)=>cs.map((c)=>c.text.trim()).where((s)=>s.isNotEmpty).toList();
-            final init=gl([i1,i2,i3]);final med=gl([m1,m2,m3]);final fin=gl([f1,f2,f3]);
-            final isDup=Store.existsWord(word,excludeId:existing?.id);
-            Navigator.pop(ctx);
-            if(isDup){
-              final confirm=await showDialog<bool>(context:context,builder:(c2)=>AlertDialog(
-                shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-                title:const Text('중복 확인',style:TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-                content:const Text('이미 존재합니다. 그래도 저장할까요?'),
-                actions:[
-                  TextButton(onPressed:()=>Navigator.pop(c2,false),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-                  ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
-                      onPressed:()=>Navigator.pop(c2,true),child:const Text('저장')),
-                ]));
-              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite);
-            }else{
-              final confirm=await showDialog<bool>(context:context,builder:(c2)=>AlertDialog(
-                shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-                title:const Text('저장 확인',style:TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-                content:const Text('저장할까요?'),
-                actions:[
-                  TextButton(onPressed:()=>Navigator.pop(c2,false),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-                  ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
-                      onPressed:()=>Navigator.pop(c2,true),child:const Text('저장')),
-                ]));
-              if(confirm==true)await _doSave(existing,word,init,med,fin,isComposite,isConcurrent,isAttached,isFavorite);
-            }
-          },
-          child:const Text('다음')),
-      ],
-    )));
+    // ★ 저장 로직 함수화
+    Future<void> doSaveFlow(BuildContext ctx, StateSetter setS) async {
+      final rawWord = wordCtrl.text.trim();
+      if (rawWord.isEmpty) return;
+      final word = encodeWord(rawWord);
+      // + 또는 공백으로 분리
+      List<String> parseField(String s) =>
+          s.split(RegExp(r'[+\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+      final init = parseField(initialCtrl.text);
+      final med  = parseField(medialCtrl.text);
+      final fin  = parseField(finalCtrl.text);
+      final isDup = Store.existsWord(word, excludeId: existing?.id);
+      Navigator.pop(ctx);
+      if (isDup) {
+        final confirm = await showDialog<bool>(context: context, builder: (c2) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('중복 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: const Text('이미 존재합니다. 그래도 저장할까요?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c2, false),
+                child: const Text('취소', style: TextStyle(color: Colors.grey))),
+            ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(c2, true), child: const Text('저장')),
+          ]));
+        if (confirm == true) await _doSave(existing, word, init, med, fin, isComposite, isConcurrent, isAttached, isFavorite);
+      } else {
+        final confirm = await showDialog<bool>(context: context, builder: (c2) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('저장 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+          content: const Text('저장할까요?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(c2, false),
+                child: const Text('취소', style: TextStyle(color: Colors.grey))),
+            ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(c2, true), child: const Text('저장')),
+          ]));
+        if (confirm == true) await _doSave(existing, word, init, med, fin, isComposite, isConcurrent, isAttached, isFavorite);
+      }
+    }
+
+    showDialog(
+      context: context,
+      // ★ 3번: 팝업 뒤 스크롤 가능하게 barrierColor 설정
+      barrierColor: Colors.black.withOpacity(0.3),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(existing == null ? '약어 추가' : '약어 수정',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: SingleChildScrollView(child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _lbl('단어'),
+            TextField(
+              controller: wordCtrl,
+              decoration: _inputDeco(''),
+              // ★ 2번: 마지막 필드에서 엔터 시 저장
+              textInputAction: TextInputAction.next,
+            ),
+            const SizedBox(height: 4),
+            Text('※ 띄어쓰기는 저장 시 * 로 자동 변환됩니다',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+            const SizedBox(height: 12),
+            // ★ 4번: 초성 - 하나의 칸, +로 구분 입력
+            _lbl('초성'),
+            TextField(
+              controller: initialCtrl,
+              decoration: _inputDeco('예: ㄱ  또는  ㄱ+ㄴ'),
+              textInputAction: TextInputAction.next,
+            ),
+            const SizedBox(height: 8),
+            _lbl('중성'),
+            TextField(
+              controller: medialCtrl,
+              decoration: _inputDeco('예: ㅜ  또는  ㅜ+ㅣ'),
+              textInputAction: TextInputAction.next,
+            ),
+            const SizedBox(height: 8),
+            _lbl('종성'),
+            TextField(
+              controller: finalCtrl,
+              decoration: _inputDeco('예: ㅎ  또는  ㅋ+ㅎ+ㅅ'),
+              // ★ 2번: 마지막 필드에서 엔터 누르면 저장
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => doSaveFlow(ctx, setS),
+            ),
+            const SizedBox(height: 4),
+            Text('※ 종성 ㅋ → 자동으로 (ㅋ) 표시  |  여러 값은 + 로 구분',
+                style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+            const SizedBox(height: 12),
+            Wrap(spacing: 0, runSpacing: 4, children: [
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Checkbox(value: isComposite, activeColor: kBlueSky,
+                    onChanged: (v) => setS(() => isComposite = v ?? false)),
+                const Text('합성약어', style: TextStyle(fontSize: 13)),
+              ]),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Checkbox(value: isConcurrent, activeColor: kPurple,
+                    onChanged: (v) => setS(() => isConcurrent = v ?? false)),
+                const Text('동시처리', style: TextStyle(fontSize: 13)),
+              ]),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Checkbox(value: isAttached, activeColor: kBlueDark,
+                    onChanged: (v) => setS(() => isAttached = v ?? false)),
+                const Text('붙여쓰기', style: TextStyle(fontSize: 13)),
+              ]),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Checkbox(value: isFavorite, activeColor: kBlue,
+                    onChanged: (v) => setS(() => isFavorite = v ?? false)),
+                const Text('즐겨찾기', style: TextStyle(fontSize: 13)),
+              ]),
+            ]),
+          ],
+        )),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx),
+              child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: kBlue, foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+            onPressed: () => doSaveFlow(ctx, setS),
+            child: const Text('다음')),
+        ],
+      )),
+    );
   }
 
-  Future<void> _doSave(AbbreviationModel? existing,String word,List<String> init,List<String> med,List<String> fin,
-      bool isComposite,bool isConcurrent,bool isAttached,bool isFavorite)async{
+  Future<void> _doSave(AbbreviationModel? existing, String word,
+      List<String> init, List<String> med, List<String> fin,
+      bool isComposite, bool isConcurrent, bool isAttached, bool isFavorite) async {
     await Store.saveAbbreviation(AbbreviationModel(
-      id:existing?.id??DateTime.now().millisecondsSinceEpoch.toString(),
-      word:word,initial:init,medial:med,final_:fin,
-      isComposite:isComposite,isConcurrent:isConcurrent,isAttached:isAttached,isFavorite:isFavorite));
+      id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+      word: word, initial: init, medial: med, final_: fin,
+      isComposite: isComposite, isConcurrent: isConcurrent,
+      isAttached: isAttached, isFavorite: isFavorite));
+    // ★ 5번: 약어 등록 후 문장 분석 즉시 재적용
+    if (_analyzerAnalyzed) {
+      _analyzerAnalyzed = true; // 재분석 트리거
+    }
   }
 
-  void _confirmDelete(BuildContext context,AbbreviationModel a){
-    showDialog(context:context,builder:(ctx)=>AlertDialog(
-      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-      title:const Text('삭제 확인',style:TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-      content:Text('"${a.displayWord}" 약어를 삭제할까요?'),
-      actions:[
-        TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-        ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:Colors.red,foregroundColor:Colors.white),
-            onPressed:()async{await Store.deleteAbbreviation(a.id);if(ctx.mounted)Navigator.pop(ctx);},
-            child:const Text('삭제')),
+  void _confirmDelete(BuildContext context, AbbreviationModel a) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('삭제 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Text('"${a.displayWord}" 약어를 삭제할까요?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () async { await Store.deleteAbbreviation(a.id); if (ctx.mounted) Navigator.pop(ctx); },
+            child: const Text('삭제')),
       ]));
   }
 }
@@ -1215,94 +1295,120 @@ class _SearchScreenState extends State<SearchScreen> {
 // ════════════════════════════════════════════════════════
 class SentenceRegisterScreen extends StatefulWidget {
   const SentenceRegisterScreen({super.key});
-  @override State<SentenceRegisterScreen> createState()=>_SentenceRegisterScreenState();
+  @override State<SentenceRegisterScreen> createState() => _SentenceRegisterScreenState();
 }
-class _SentenceRegisterScreenState extends State<SentenceRegisterScreen>{
-  final _ctrl=TextEditingController();
-  final _focusNode=FocusNode();
-  @override void dispose(){_ctrl.dispose();_focusNode.dispose();super.dispose();}
+class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
+  final _ctrl      = TextEditingController();
+  final _focusNode = FocusNode();
+  @override void dispose() { _ctrl.dispose(); _focusNode.dispose(); super.dispose(); }
 
-  void _save(BuildContext context){
-    final text=_ctrl.text.trim();
-    if(text.isEmpty)return;
-    showDialog(context:context,builder:(ctx)=>AlertDialog(
-      shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-      title:const Text('저장 확인',style:TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-      content:const Text('저장할까요?'),
-      actions:[
-        TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-        ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
-          onPressed:()async{
+  void _save(BuildContext context) {
+    final text = _ctrl.text.trim();
+    if (text.isEmpty) return;
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('저장 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: const Text('저장할까요?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+          onPressed: () async {
             await Store.saveSentence(SavedSentenceModel(
-              id:DateTime.now().millisecondsSinceEpoch.toString(),text:text,
-              createdAt:DateTime.now().toString().substring(0,10)));
-            _ctrl.clear();if(ctx.mounted)Navigator.pop(ctx);},
-          child:const Text('저장')),
+              id: DateTime.now().millisecondsSinceEpoch.toString(), text: text,
+              createdAt: DateTime.now().toString().substring(0, 10)));
+            _ctrl.clear();
+            if (ctx.mounted) Navigator.pop(ctx);
+          },
+          child: const Text('저장')),
       ]));
   }
 
-  @override Widget build(BuildContext context){
+  @override
+  Widget build(BuildContext context) {
     return ValueListenableBuilder(
-      valueListenable:Hive.box('sentences').listenable(),
-      builder:(context,box,_){
-        final sentences=Store.getSentences();
-        return Scaffold(backgroundColor:Colors.white,resizeToAvoidBottomInset:true,
-          body:SafeArea(child:Column(children:[
-            const Padding(padding:EdgeInsets.fromLTRB(20,20,20,12),
-                child:Align(alignment:Alignment.centerLeft,
-                    child:Text('문장 등록',style:TextStyle(fontSize:18,fontWeight:FontWeight.w900)))),
-            Padding(padding:const EdgeInsets.symmetric(horizontal:16),child:Column(children:[
-              TextField(controller:_ctrl,focusNode:_focusNode,maxLines:3,
-                decoration:InputDecoration(hintText:'복습할 문장을 입력하세요...',
-                  border:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:Color(0xFFE0E0E0))),
-                  focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(12),borderSide:const BorderSide(color:kBlue)))),
-              const SizedBox(height:8),
-              SizedBox(width:double.infinity,child:ElevatedButton(
-                onPressed:()=>_save(context),
-                style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white,
-                    padding:const EdgeInsets.symmetric(vertical:13),
-                    shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12))),
-                child:const Text('저장하기',style:TextStyle(fontSize:14,fontWeight:FontWeight.w700)))),
+      valueListenable: Hive.box('sentences').listenable(),
+      builder: (context, box, _) {
+        final sentences = Store.getSentences();
+        return Scaffold(
+          backgroundColor: Colors.white,
+          resizeToAvoidBottomInset: true,
+          body: SafeArea(child: Column(children: [
+            const Padding(padding: EdgeInsets.fromLTRB(20,20,20,12),
+                child: Align(alignment: Alignment.centerLeft,
+                    child: Text('문장 등록',
+                        style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)))),
+            Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Column(children: [
+              TextField(
+                controller: _ctrl, focusNode: _focusNode, maxLines: 3,
+                decoration: InputDecoration(
+                  hintText: '복습할 문장을 입력하세요...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: kBlue)),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: () => _save(context),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kBlue, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: const Text('저장하기',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700)))),
             ])),
-            const SizedBox(height:8),
-            Expanded(child:sentences.isEmpty
-              ?const Center(child:Text('저장된 문장이 없습니다',style:TextStyle(color:Colors.grey,fontSize:14)))
-              :ListView.builder(
-                  keyboardDismissBehavior:ScrollViewKeyboardDismissBehavior.manual,
-                  padding:const EdgeInsets.symmetric(horizontal:16),
-                  itemCount:sentences.length,
-                  itemBuilder:(ctx,i){
-                    final s=sentences[i];
+            const SizedBox(height: 8),
+            Expanded(child: sentences.isEmpty
+              ? const Center(child: Text('저장된 문장이 없습니다',
+                  style: TextStyle(color: Colors.grey, fontSize: 14)))
+              : ListView.builder(
+                  keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: sentences.length,
+                  itemBuilder: (ctx, i) {
+                    final s = sentences[i];
                     return Container(
-                      margin:const EdgeInsets.only(bottom:8),padding:const EdgeInsets.all(14),
-                      decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(12),
-                          border:Border.all(color:const Color(0xFFEEF0F8))),
-                      child:Row(children:[
-                        Expanded(child:SelectableText(s.text,style:const TextStyle(fontSize:14,height:1.6))),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white, borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFEEF0F8))),
+                      child: Row(children: [
+                        Expanded(child: SelectableText(s.text,
+                            style: const TextStyle(fontSize: 14, height: 1.6))),
                         PopupMenuButton<String>(
-                          icon:const Icon(Icons.more_horiz,color:Colors.grey),
-                          shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),
-                          onSelected:(v)async{
-                            if(v=='remind')_showReminderDialog(ctx,s.text,'sentence');
-                            if(v=='delete'){
-                              final ok=await showDialog<bool>(context:ctx,builder:(c2)=>AlertDialog(
-                                shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-                                title:const Text('삭제 확인',style:TextStyle(fontSize:16,fontWeight:FontWeight.w700)),
-                                content:const Text('이 문장을 삭제할까요?'),
-                                actions:[
-                                  TextButton(onPressed:()=>Navigator.pop(c2,false),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-                                  ElevatedButton(style:ElevatedButton.styleFrom(backgroundColor:Colors.red,foregroundColor:Colors.white),
-                                      onPressed:()=>Navigator.pop(c2,true),child:const Text('삭제')),
+                          icon: const Icon(Icons.more_horiz, color: Colors.grey),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                          onSelected: (v) async {
+                            if (v == 'remind') _showReminderDialog(ctx, s.text, 'sentence');
+                            if (v == 'delete') {
+                              final ok = await showDialog<bool>(context: ctx, builder: (c2) => AlertDialog(
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                                title: const Text('삭제 확인',
+                                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                                content: const Text('이 문장을 삭제할까요?'),
+                                actions: [
+                                  TextButton(onPressed: () => Navigator.pop(c2, false),
+                                      child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                                  ElevatedButton(style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.red, foregroundColor: Colors.white),
+                                      onPressed: () => Navigator.pop(c2, true),
+                                      child: const Text('삭제')),
                                 ]));
-                              if(ok==true)await Store.deleteSentence(s.id);
-                            }},
-                          itemBuilder:(_)=>[
-                            const PopupMenuItem(value:'remind',child:Text('🔔 리마인드 설정')),
-                            const PopupMenuItem(value:'delete',child:Text('🗑 삭제',style:TextStyle(color:Colors.red))),
+                              if (ok == true) await Store.deleteSentence(s.id);
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            const PopupMenuItem(value: 'remind', child: Text('🔔 리마인드 설정')),
+                            const PopupMenuItem(value: 'delete',
+                                child: Text('🗑 삭제', style: TextStyle(color: Colors.red))),
                           ]),
                       ]));
                   })),
-          ])));
+          ])),
+        );
       });
   }
 }
@@ -1312,176 +1418,218 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen>{
 // ════════════════════════════════════════════════════════
 class RemindersScreen extends StatelessWidget {
   const RemindersScreen({super.key});
-  String _tl(String t)=>t=='word'?'약어':t=='favorite'?'즐겨찾기':'문장';
-  @override Widget build(BuildContext context){
+  String _tl(String t) => t == 'word' ? '약어' : t == 'favorite' ? '즐겨찾기' : '문장';
+  @override
+  Widget build(BuildContext context) {
     return ValueListenableBuilder(
-      valueListenable:Hive.box('reminders').listenable(),
-      builder:(context,box,_){
-        final reminders=Store.getReminders();
-        return Scaffold(backgroundColor:Colors.white,
-          body:SafeArea(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-            Padding(padding:const EdgeInsets.fromLTRB(20,20,20,12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-              const Text('리마인드',style:TextStyle(fontSize:18,fontWeight:FontWeight.w900)),
-              Text('${reminders.length}개',style:const TextStyle(fontSize:13,color:Colors.grey)),
+      valueListenable: Hive.box('reminders').listenable(),
+      builder: (context, box, _) {
+        final reminders = Store.getReminders();
+        return Scaffold(
+          backgroundColor: Colors.white,
+          body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const Text('리마인드', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+              Text('${reminders.length}개', style: const TextStyle(fontSize: 13, color: Colors.grey)),
             ])),
-            Expanded(child:reminders.isEmpty
-              ?const Center(child:Text('설정된 리마인드가 없습니다',style:TextStyle(color:Colors.grey,fontSize:14)))
-              :ListView.builder(
-                  padding:const EdgeInsets.symmetric(horizontal:16),
-                  itemCount:reminders.length,
-                  itemBuilder:(ctx,i){
-                    final r=reminders[i];
+            Expanded(child: reminders.isEmpty
+              ? const Center(child: Text('설정된 리마인드가 없습니다',
+                  style: TextStyle(color: Colors.grey, fontSize: 14)))
+              : ListView.builder(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  itemCount: reminders.length,
+                  itemBuilder: (ctx, i) {
+                    final r = reminders[i];
                     return Container(
-                      margin:const EdgeInsets.only(bottom:8),padding:const EdgeInsets.all(14),
-                      decoration:BoxDecoration(
-                        color:r.active?Colors.white:const Color(0xFFF8F8F8),
-                        borderRadius:BorderRadius.circular(12),border:Border.all(color:const Color(0xFFEEF0F8))),
-                      child:Row(children:[
-                        Container(padding:const EdgeInsets.symmetric(horizontal:8,vertical:3),
-                          decoration:BoxDecoration(color:kBlueLight,borderRadius:BorderRadius.circular(8)),
-                          child:Text(_tl(r.type),style:const TextStyle(fontSize:11,color:kBlue,fontWeight:FontWeight.w700))),
-                        const SizedBox(width:10),
-                        Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-                          SelectableText(r.target,style:const TextStyle(fontSize:14,fontWeight:FontWeight.w600),maxLines:1),
-                          Text('${r.date} · ${r.intervalDays}일 간격${r.repeat?" · 반복":""}',
-                              style:const TextStyle(fontSize:11,color:Colors.grey)),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: r.active ? Colors.white : const Color(0xFFF8F8F8),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFEEF0F8))),
+                      child: Row(children: [
+                        Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                          child: Text(_tl(r.type), style: const TextStyle(
+                              fontSize: 11, color: kBlue, fontWeight: FontWeight.w700))),
+                        const SizedBox(width: 10),
+                        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                          SelectableText(r.target, style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w600), maxLines: 1),
+                          Text('${r.date} · ${r.intervalDays}일 간격${r.repeat ? " · 반복" : ""}',
+                              style: const TextStyle(fontSize: 11, color: Colors.grey)),
                         ])),
-                        Switch(value:r.active,activeColor:kBlue,onChanged:(_)async{await Store.toggleReminder(r.id);}),
-                        IconButton(icon:const Icon(Icons.delete_outline,color:Colors.grey,size:20),
-                            onPressed:()async{await Store.deleteReminder(r.id);}),
+                        Switch(value: r.active, activeColor: kBlue,
+                            onChanged: (_) async { await Store.toggleReminder(r.id); }),
+                        IconButton(icon: const Icon(Icons.delete_outline, color: Colors.grey, size: 20),
+                            onPressed: () async { await Store.deleteReminder(r.id); }),
                       ]));
                   })),
-          ])));
+          ])),
+        );
       });
   }
 }
 
 // ════════════════════════════════════════════════════════
-// 공통 위젯
+// 공통 위젯 - ★ 1번: 타입 레이블 모두 표시
 // ════════════════════════════════════════════════════════
 class _AbbrTile extends StatelessWidget {
   final AbbreviationModel abbr;
   const _AbbrTile({required this.abbr});
-  @override Widget build(BuildContext context)=>Container(
-    margin:const EdgeInsets.only(bottom:8),padding:const EdgeInsets.all(12),
-    decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(10),
-        border:Border.all(color:const Color(0xFFEEF0F8))),
-    child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-      Row(children:[
-        if(abbr.isAttached)const Text('↙ ',style:TextStyle(fontSize:14,color:kBlueDark,fontWeight:FontWeight.w700)),
-        // ★ displayWord (* 포함) 로 표시
-        Text(abbr.displayWord,style:TextStyle(color:abbr.typeColor,fontWeight:FontWeight.w700,fontSize:15)),
-        if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12)),
-        if(abbr.typeLabel.isNotEmpty)Container(
-          margin:const EdgeInsets.only(left:6),
-          padding:const EdgeInsets.symmetric(horizontal:6,vertical:1),
-          decoration:BoxDecoration(
-            color:abbr.isConcurrent?kPurpleLight:const Color(0xFFE0F4FF),
-            borderRadius:BorderRadius.circular(8)),
-          child:Text(abbr.typeLabel,style:TextStyle(fontSize:10,color:abbr.typeColor,fontWeight:FontWeight.w700))),
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.all(12),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFEEF0F8))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        if (abbr.isAttached) const Text('↙ ',
+            style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
+        Text(abbr.displayWord, style: TextStyle(
+            color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
+        if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
+        // ★ 모든 타입 레이블 표시
+        ...abbr.typeLabels.map((label) {
+          final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
+          final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
+          return Container(
+            margin: const EdgeInsets.only(left: 4),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+            decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8)),
+            child: Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w700)));
+        }),
       ]),
-      const SizedBox(height:4),
-      SelectableText(abbr.strokeDisplay,style:const TextStyle(fontSize:12,color:Colors.grey)),
-    ]));
+      const SizedBox(height: 4),
+      SelectableText(abbr.strokeDisplay,
+          style: const TextStyle(fontSize: 12, color: Colors.grey)),
+    ]),
+  );
 }
 
 class _AbbrListTile extends StatelessWidget {
   final AbbreviationModel abbr;
-  final VoidCallback? onFav,onEdit,onDelete,onRemind;
-  const _AbbrListTile({required this.abbr,this.onFav,this.onEdit,this.onDelete,this.onRemind});
-  @override Widget build(BuildContext context)=>Container(
-    margin:const EdgeInsets.only(bottom:8),padding:const EdgeInsets.all(14),
-    decoration:BoxDecoration(color:Colors.white,borderRadius:BorderRadius.circular(12),
-        border:Border.all(color:const Color(0xFFEEF0F8))),
-    child:Row(children:[
-      Expanded(child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[
-        Row(children:[
-          if(abbr.isAttached)const Text('↙ ',style:TextStyle(fontSize:14,color:kBlueDark,fontWeight:FontWeight.w700)),
-          // ★ displayWord (* 포함) 로 표시
-          Text(abbr.displayWord,style:TextStyle(color:abbr.typeColor,fontWeight:FontWeight.w700,fontSize:15)),
-          if(abbr.isFavorite)const Text(' ⭐',style:TextStyle(fontSize:12)),
-          if(abbr.typeLabel.isNotEmpty)Container(
-            margin:const EdgeInsets.only(left:6),
-            padding:const EdgeInsets.symmetric(horizontal:6,vertical:1),
-            decoration:BoxDecoration(
-              color:abbr.isConcurrent?kPurpleLight:const Color(0xFFE0F4FF),
-              borderRadius:BorderRadius.circular(8)),
-            child:Text(abbr.typeLabel,style:TextStyle(fontSize:10,color:abbr.typeColor,fontWeight:FontWeight.w700))),
+  final VoidCallback? onFav, onEdit, onDelete, onRemind;
+  const _AbbrListTile({required this.abbr, this.onFav, this.onEdit, this.onDelete, this.onRemind});
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFEEF0F8))),
+    child: Row(children: [
+      Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          if (abbr.isAttached) const Text('↙ ',
+              style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
+          Text(abbr.displayWord, style: TextStyle(
+              color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
+          if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
+          // ★ 모든 타입 레이블 표시
+          ...abbr.typeLabels.map((label) {
+            final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
+            final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
+            return Container(
+              margin: const EdgeInsets.only(left: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+              decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8)),
+              child: Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w700)));
+          }),
         ]),
-        const SizedBox(height:4),
-        SelectableText(abbr.strokeDisplay,style:const TextStyle(fontSize:12,color:Colors.grey)),
+        const SizedBox(height: 4),
+        SelectableText(abbr.strokeDisplay,
+            style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ])),
       PopupMenuButton<String>(
-        icon:const Icon(Icons.more_horiz,color:Colors.grey),
-        shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(12)),
-        onSelected:(v){
-          if(v=='fav'&&onFav!=null)onFav!();
-          if(v=='edit'&&onEdit!=null)onEdit!();
-          if(v=='delete'&&onDelete!=null)onDelete!();
-          if(v=='remind'&&onRemind!=null)onRemind!();
+        icon: const Icon(Icons.more_horiz, color: Colors.grey),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        onSelected: (v) {
+          if (v == 'fav'    && onFav    != null) onFav!();
+          if (v == 'edit'   && onEdit   != null) onEdit!();
+          if (v == 'delete' && onDelete != null) onDelete!();
+          if (v == 'remind' && onRemind != null) onRemind!();
         },
-        itemBuilder:(_)=>[
-          PopupMenuItem(value:'fav',child:Text(abbr.isFavorite?'⭐ 즐겨찾기 해제':'☆ 즐겨찾기 추가')),
-          if(onEdit!=null)const PopupMenuItem(value:'edit',child:Text('✏️ 수정')),
-          if(onRemind!=null)const PopupMenuItem(value:'remind',child:Text('🔔 리마인드 설정')),
-          if(onDelete!=null)const PopupMenuItem(value:'delete',child:Text('🗑 삭제',style:TextStyle(color:Colors.red))),
+        itemBuilder: (_) => [
+          PopupMenuItem(value: 'fav',
+              child: Text(abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가')),
+          if (onEdit   != null) const PopupMenuItem(value: 'edit',   child: Text('✏️ 수정')),
+          if (onRemind != null) const PopupMenuItem(value: 'remind', child: Text('🔔 리마인드 설정')),
+          if (onDelete != null) const PopupMenuItem(value: 'delete',
+              child: Text('🗑 삭제', style: TextStyle(color: Colors.red))),
         ]),
-    ]));
+    ]),
+  );
 }
 
 class _Leg extends StatelessWidget {
-  final Color color;final String label;
-  const _Leg({required this.color,required this.label});
-  @override Widget build(BuildContext context)=>Row(mainAxisSize:MainAxisSize.min,children:[
-    Container(width:12,height:12,decoration:BoxDecoration(color:color,borderRadius:BorderRadius.circular(3))),
-    const SizedBox(width:4),
-    Text(label,style:const TextStyle(fontSize:11,color:Colors.grey)),
+  final Color color; final String label;
+  const _Leg({required this.color, required this.label});
+  @override Widget build(BuildContext context) => Row(mainAxisSize: MainAxisSize.min, children: [
+    Container(width: 12, height: 12,
+        decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3))),
+    const SizedBox(width: 4),
+    Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
   ]);
 }
 
-void _showReminderDialog(BuildContext context,String target,String type){
-  int interval=1;bool repeat=false;
-  showDialog(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setS)=>AlertDialog(
-    shape:RoundedRectangleBorder(borderRadius:BorderRadius.circular(16)),
-    title:const Text('리마인드 설정',style:TextStyle(fontSize:15,fontWeight:FontWeight.w700)),
-    content:Column(mainAxisSize:MainAxisSize.min,children:[
-      Wrap(spacing:8,children:[1,3,7].map((d)=>GestureDetector(
-        onTap:()=>setS(()=>interval=d),
-        child:Container(padding:const EdgeInsets.symmetric(horizontal:14,vertical:6),
-          decoration:BoxDecoration(color:interval==d?kBlue:kBlueLight,borderRadius:BorderRadius.circular(20)),
-          child:Text('$d일',style:TextStyle(color:interval==d?Colors.white:kBlue,fontWeight:FontWeight.w700))),
-      )).toList()),
-      const SizedBox(height:12),
-      Row(children:[
-        Checkbox(value:repeat,activeColor:kBlue,onChanged:(v)=>setS(()=>repeat=v??false)),
-        const Text('반복'),
+void _showReminderDialog(BuildContext context, String target, String type) {
+  int interval = 1; bool repeat = false;
+  showDialog(context: context, builder: (ctx) => StatefulBuilder(
+    builder: (ctx, setS) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('리마인드 설정', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(
+          onTap: () => setS(() => interval = d),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+            decoration: BoxDecoration(
+                color: interval == d ? kBlue : kBlueLight,
+                borderRadius: BorderRadius.circular(20)),
+            child: Text('$d일', style: TextStyle(
+                color: interval == d ? Colors.white : kBlue,
+                fontWeight: FontWeight.w700))),
+        )).toList()),
+        const SizedBox(height: 12),
+        Row(children: [
+          Checkbox(value: repeat, activeColor: kBlue,
+              onChanged: (v) => setS(() => repeat = v ?? false)),
+          const Text('반복'),
+        ]),
       ]),
-    ]),
-    actions:[
-      TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('취소',style:TextStyle(color:Colors.grey))),
-      ElevatedButton(
-        style:ElevatedButton.styleFrom(backgroundColor:kBlue,foregroundColor:Colors.white),
-        onPressed:()async{
-          final date=DateTime.now().add(Duration(days:interval));
-          final ds='${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-          await Store.saveReminder(ReminderModel(
-            id:DateTime.now().millisecondsSinceEpoch.toString(),
-            type:type,target:target,date:ds,intervalDays:interval,repeat:repeat));
-          if(ctx.mounted)Navigator.pop(ctx);},
-        child:const Text('설정')),
-    ])));
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+          onPressed: () async {
+            final date = DateTime.now().add(Duration(days: interval));
+            final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+            await Store.saveReminder(ReminderModel(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              type: type, target: target, date: ds,
+              intervalDays: interval, repeat: repeat));
+            if (ctx.mounted) Navigator.pop(ctx);
+          },
+          child: const Text('설정')),
+      ])));
 }
 
-Widget _lbl(String text)=>Padding(
-  padding:const EdgeInsets.only(bottom:6),
-  child:Text(text,style:const TextStyle(fontSize:13,color:Colors.grey,fontWeight:FontWeight.w600)));
+Widget _lbl(String text) => Padding(
+  padding: const EdgeInsets.only(bottom: 6),
+  child: Text(text, style: const TextStyle(
+      fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)));
 
-InputDecoration _inputDeco(String? hint)=>InputDecoration(
-  hintText:hint,isDense:true,
-  contentPadding:const EdgeInsets.symmetric(horizontal:12,vertical:10),
-  border:OutlineInputBorder(borderRadius:BorderRadius.circular(8),borderSide:const BorderSide(color:Color(0xFFE0E0E0))),
-  focusedBorder:OutlineInputBorder(borderRadius:BorderRadius.circular(8),borderSide:const BorderSide(color:kBlue)));
+InputDecoration _inputDeco(String? hint) => InputDecoration(
+  hintText: hint, isDense: true,
+  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8),
+      borderSide: const BorderSide(color: kBlue)));
 
-extension ListExt<T> on List<T>{
-  T? elementAtOrNull(int index)=>(index>=0&&index<length)?this[index]:null;
+extension ListExt<T> on List<T> {
+  T? elementAtOrNull(int index) => (index >= 0 && index < length) ? this[index] : null;
 }
