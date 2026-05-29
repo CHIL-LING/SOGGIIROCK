@@ -31,6 +31,29 @@ String encodeWord(String raw) => raw.replaceAll(' ', '*');
 String decodeWordForSearch(String word) => word.replaceAll('*', '');
 
 // ════════════════════════════════════════════════════════
+// ★ 6번: 으(므)로 / 와(과) 같~ 치환 유틸
+// ════════════════════════════════════════════════════════
+bool _hasFinalConsonant(String char) {
+  if (char.isEmpty) return false;
+  final code = char.codeUnitAt(0);
+  if (code < 0xAC00 || code > 0xD7A3) return false;
+  return (code - 0xAC00) % 28 != 0;
+}
+
+String resolveFlexibleAbbr(String abbrWord, String prevChar) {
+  // 으(므)로 처리
+  if (abbrWord == '으(므)로') {
+    return _hasFinalConsonant(prevChar) ? '므로' : '으로';
+  }
+  // 와(과) 같~ 처리
+  if (abbrWord.startsWith('와(과)')) {
+    final suffix = abbrWord.substring(4);
+    return (_hasFinalConsonant(prevChar) ? '과' : '와') + suffix;
+  }
+  return abbrWord;
+}
+
+// ════════════════════════════════════════════════════════
 // 데이터 모델
 // ════════════════════════════════════════════════════════
 class AbbreviationModel {
@@ -57,7 +80,7 @@ class AbbreviationModel {
   });
 
   String get searchKey => decodeWordForSearch(word);
-  String get displayWord => word;
+  String get displayWord => word.replaceAll('*', ' ');
 
   Map<String, dynamic> toMap() => {
     'id': id, 'word': word,
@@ -95,18 +118,16 @@ class AbbreviationModel {
   );
 
   String get strokeDisplay {
-    String fmtInitial(List<String> l) => l.join('+');
-    String fmtMedial(List<String> l)  => l.join('+');
-    String fmtFinal(List<String> l)   =>
+    String fmtFinal(List<String> l) =>
         l.map((v) => v == 'ㅋ' ? '(ㅋ)' : v).join('+');
     final parts = <String>[];
-    if (initial.isNotEmpty) parts.add(fmtInitial(initial));
-    if (medial.isNotEmpty)  parts.add(fmtMedial(medial));
+    if (initial.isNotEmpty) parts.add(initial.join('+'));
+    if (medial.isNotEmpty)  parts.add(medial.join('+'));
     if (final_.isNotEmpty)  parts.add(fmtFinal(final_));
     return parts.join(' / ');
   }
 
-  // ★ 1번 수정: 모든 타입 레이블을 리스트로 반환 (우선순위 없이 전부 표시)
+  // ★ 1번: 모든 타입 레이블 리스트로 반환
   List<String> get typeLabels {
     final labels = <String>[];
     if (isConcurrent) labels.add('동시');
@@ -114,9 +135,6 @@ class AbbreviationModel {
     if (isAttached)   labels.add('붙여쓰기');
     return labels;
   }
-
-  // 기존 호환성 유지
-  String get typeLabel => typeLabels.join('/');
 
   Color get typeColor {
     if (isConcurrent) return kPurple;
@@ -292,19 +310,21 @@ class StudyTimer extends ChangeNotifier {
 }
 
 // ════════════════════════════════════════════════════════
-// 문장 분석
+// 문장 분석 (★ 6번: 으(므)로 / 와(과)같~ 적용)
 // ════════════════════════════════════════════════════════
 class _Span {
   final String text;
   final String type;
   final AbbreviationModel? abbr;
-  const _Span({required this.text, required this.type, this.abbr});
+  final String? resolvedText; // 으(므)로 등 치환된 실제 표시 텍스트
+  const _Span({required this.text, required this.type, this.abbr, this.resolvedText});
 }
 
 List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   final normalized = raw.replaceAll(' ', '*');
   List<_Span> parts = [_Span(text: normalized, type: 'normal')];
   final sorted = [...abbrevs]..sort((a, b) => b.word.length.compareTo(a.word.length));
+
   for (final a in sorted) {
     final next = <_Span>[];
     for (final p in parts) {
@@ -316,7 +336,14 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
           String type = 'abbr';
           if (a.isConcurrent) type = 'concurrent';
           else if (a.isComposite) type = 'composite';
-          next.add(_Span(text: a.word, type: type, abbr: a));
+          // 이전 글자 구하기
+          String prevChar = '';
+          if (next.isNotEmpty) {
+            final prevText = next.last.resolvedText ?? next.last.text;
+            if (prevText.isNotEmpty) prevChar = prevText[prevText.length - 1];
+          }
+          final resolved = resolveFlexibleAbbr(a.word, prevChar);
+          next.add(_Span(text: a.word, type: type, abbr: a, resolvedText: resolved));
         }
       }
     }
@@ -469,7 +496,6 @@ class _HomeScreenState extends State<HomeScreen> {
         return Scaffold(
           backgroundColor: Colors.white,
           body: SafeArea(child: SingleChildScrollView(child: Column(children: [
-
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 14, 20, 0),
               child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
@@ -494,10 +520,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ]),
               ]),
             ),
-
             const SizedBox(height: 8),
-
-            // ★ 6번: 달력 - 작은 동그라미로 변경
             Center(
               child: SizedBox(
                 width: calW,
@@ -520,49 +543,25 @@ class _HomeScreenState extends State<HomeScreen> {
                       final isSel  = key == _selected;
                       return GestureDetector(
                         onTap: () => setState(() => _selected = key),
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            // 선택된 날 배경
-                            if (isSel)
-                              Container(
-                                decoration: BoxDecoration(
-                                  color: kBlue,
-                                  borderRadius: BorderRadius.circular(10),
-                                ),
-                              ),
-                            // ★ 기록 있는 날: 숫자 크기의 흐린 동그라미
-                            if (marked && !isSel)
-                              Container(
-                                width: 28, height: 28,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  boxShadow: [
-                                    BoxShadow(
-                                      color: kBlueSky.withOpacity(0.45),
-                                      blurRadius: 8,
-                                      spreadRadius: 4,
-                                    ),
-                                  ],
-                                  color: kBlueSky.withOpacity(0.25),
-                                ),
-                              ),
-                            Text('$day', style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: isSel || marked ? FontWeight.w700 : FontWeight.w400,
-                              color: isSel ? Colors.white : marked ? kBlueDark : Colors.black87,
-                            )),
-                          ],
-                        ),
+                        child: Stack(alignment: Alignment.center, children: [
+                          if (isSel) Container(decoration: BoxDecoration(
+                              color: kBlue, borderRadius: BorderRadius.circular(10))),
+                          if (marked && !isSel) Container(width: 28, height: 28,
+                              decoration: BoxDecoration(shape: BoxShape.circle,
+                                  boxShadow: [BoxShadow(color: kBlueSky.withOpacity(0.45),
+                                      blurRadius: 8, spreadRadius: 4)],
+                                  color: kBlueSky.withOpacity(0.25))),
+                          Text('$day', style: TextStyle(fontSize: 12,
+                            fontWeight: isSel || marked ? FontWeight.w700 : FontWeight.w400,
+                            color: isSel ? Colors.white : marked ? kBlueDark : Colors.black87)),
+                        ]),
                       );
                     },
                   ),
                 ]),
               ),
             ),
-
             const SizedBox(height: 12),
-
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(
@@ -585,28 +584,22 @@ class _HomeScreenState extends State<HomeScreen> {
                       },
                     ),
                     const SizedBox(width: 8),
-                    _TimerBtn(
-                      icon: Icons.stop_rounded,
-                      onTap: () async { await timer.saveToRecord(); timer.reset(); },
-                    ),
+                    _TimerBtn(icon: Icons.stop_rounded,
+                        onTap: () async { await timer.saveToRecord(); timer.reset(); }),
                   ]),
                 ]),
               ),
             ),
-
             const SizedBox(height: 10),
-
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(
                 width: double.infinity, padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(16)),
                 child: hasData
-                    ? _RecordCard(
-                        record: record!,
+                    ? _RecordCard(record: record!,
                         onEdit: () => _showRecordDialog(context, existing: record),
-                        onDelete: () => _confirmDeleteRecord(context, record.date),
-                      )
+                        onDelete: () => _confirmDeleteRecord(context, record.date))
                     : Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                         Text(_selected ?? '', style: const TextStyle(fontSize: 12, color: Colors.grey)),
                         ElevatedButton(
@@ -615,8 +608,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             backgroundColor: kBlue, foregroundColor: Colors.white,
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7)),
-                          child: const Text('기록 추가', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-                        ),
+                          child: const Text('기록 추가', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
                       ]),
               ),
             ),
@@ -639,9 +631,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final hourOpts = [for (int h = 0; h <= 12; h++) h];
     final minOpts  = [0,5,10,15,20,25,30,35,40,45,50,55];
 
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('$date 기록', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: SingleChildScrollView(child: Column(
@@ -689,8 +680,7 @@ class _HomeScreenState extends State<HomeScreen> {
               final rec = StudyRecordModel(
                 date: date, studyHours: hours, studyMinutes: minutes,
                 speechChars: speech, essayChars: essay,
-                wpm: int.tryParse(wpmCtrl.text.trim()), memo: memoCtrl.text.trim(),
-              );
+                wpm: int.tryParse(wpmCtrl.text.trim()), memo: memoCtrl.text.trim());
               if (!rec.hasData) {
                 Navigator.pop(ctx);
                 if (context.mounted) showDialog(context: context, builder: (c2) => AlertDialog(
@@ -708,8 +698,7 @@ class _HomeScreenState extends State<HomeScreen> {
             },
             child: const Text('저장')),
         ],
-      )),
-    );
+      )));
   }
 
   void _confirmDeleteRecord(BuildContext context, String date) {
@@ -736,8 +725,7 @@ class _TimerBtn extends StatelessWidget {
     onTap: onTap,
     child: Container(width: 36, height: 36,
         decoration: BoxDecoration(color: kBlueDark.withOpacity(0.15), borderRadius: BorderRadius.circular(10)),
-        child: Icon(icon, color: kBlueDark, size: 20)),
-  );
+        child: Icon(icon, color: kBlueDark, size: 20)));
 }
 
 class _RecordCard extends StatelessWidget {
@@ -887,21 +875,89 @@ class _PB extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════
-// 문장 내 약어 추출
-// ★ 5번: 탭 이동해도 텍스트 유지 (전역 컨트롤러 사용)
+// ★ 5번: 전역 상태로 텍스트 유지
 // ════════════════════════════════════════════════════════
 final _analyzerCtrl = TextEditingController();
 bool _analyzerAnalyzed = false;
 
+// ════════════════════════════════════════════════════════
+// 문장 내 약어 추출
+// ════════════════════════════════════════════════════════
 class SentenceAnalyzerScreen extends StatefulWidget {
   const SentenceAnalyzerScreen({super.key});
   @override State<SentenceAnalyzerScreen> createState() => _SentenceAnalyzerScreenState();
 }
 class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   final _focusNode = FocusNode();
+  // ★ 12번: 현재 선택된 약어 (툴팁용)
+  AbbreviationModel? _selectedAbbr;
+  OverlayEntry? _tooltipOverlay;
+  final _analyzerKey = GlobalKey();
 
   @override
-  void dispose() { _focusNode.dispose(); super.dispose(); }
+  void dispose() {
+    _focusNode.dispose();
+    _tooltipOverlay?.remove();
+    super.dispose();
+  }
+
+  void _showAbbrTooltip(BuildContext context, AbbreviationModel abbr, Offset position) {
+    _tooltipOverlay?.remove();
+    _tooltipOverlay = null;
+
+    final overlay = Overlay.of(context);
+    _tooltipOverlay = OverlayEntry(
+      builder: (_) => Stack(children: [
+        // 배경 터치 시 닫기
+        Positioned.fill(child: GestureDetector(
+          onTap: _closeTooltip,
+          behavior: HitTestBehavior.translucent,
+          child: const SizedBox.expand())),
+        Positioned(
+          left: position.dx.clamp(8, MediaQuery.of(context).size.width - 200),
+          top: position.dy - 70,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+              constraints: const BoxConstraints(maxWidth: 200),
+              decoration: BoxDecoration(
+                color: const Color(0xFF2A2A2A),
+                borderRadius: BorderRadius.circular(8),
+                boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.18), blurRadius: 8, offset: const Offset(0,2))],
+              ),
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  Text(abbr.displayWord,
+                      style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
+                  if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 10)),
+                  ...abbr.typeLabels.map((l) => Container(
+                    margin: const EdgeInsets.only(left: 3),
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(4)),
+                    child: Text(l, style: const TextStyle(fontSize: 9, color: Colors.white70)))),
+                ]),
+                if (abbr.strokeDisplay.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Text(abbr.strokeDisplay, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                ],
+              ]),
+            ),
+          ),
+        ),
+      ]),
+    );
+    overlay.insert(_tooltipOverlay!);
+    setState(() => _selectedAbbr = abbr);
+  }
+
+  void _closeTooltip() {
+    _tooltipOverlay?.remove();
+    _tooltipOverlay = null;
+    if (mounted) setState(() => _selectedAbbr = null);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -916,7 +972,10 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
             : <AbbreviationModel>[];
 
         return GestureDetector(
-          onTap: () => FocusScope.of(context).requestFocus(_focusNode),
+          onTap: () {
+            _closeTooltip();
+            FocusScope.of(context).requestFocus(_focusNode);
+          },
           child: Scaffold(
             backgroundColor: Colors.white,
             resizeToAvoidBottomInset: true,
@@ -938,8 +997,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                           borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(color: kBlue)),
-                    ),
+                          borderSide: const BorderSide(color: kBlue))),
                   ),
                   const SizedBox(height: 10),
                   SizedBox(width: double.infinity, child: ElevatedButton(
@@ -964,21 +1022,47 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                       const Text('⭐ 즐겨찾기', style: TextStyle(fontSize: 11, color: Colors.grey)),
                     ]),
                     const SizedBox(height: 8),
+                    // ★ 12번: 약어 클릭 시 툴팁
                     Container(
+                      key: _analyzerKey,
                       width: double.infinity, padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
                           borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: kBlueLight)),
-                      child: SelectableText.rich(TextSpan(children: parts.map((p) {
-                        Color color = Colors.black87; FontWeight fw = FontWeight.w400;
-                        if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
-                        if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
-                        if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
-                        String display = p.text;
-                        if (p.abbr != null && p.abbr!.isFavorite) display = '$display⭐';
-                        return TextSpan(text: display,
-                            style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
-                      }).toList())),
+                      child: Wrap(
+                        children: parts.map((p) {
+                          Color color = Colors.black87;
+                          FontWeight fw = FontWeight.w400;
+                          if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
+                          if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
+                          if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
+                          final displayText = (p.resolvedText ?? p.text)
+                              + (p.abbr?.isFavorite == true ? '⭐' : '');
+                          if (p.abbr != null) {
+                            final isSelected = _selectedAbbr?.id == p.abbr!.id;
+                            return GestureDetector(
+                              onTapUp: (details) {
+                                if (isSelected) {
+                                  _closeTooltip();
+                                } else {
+                                  _showAbbrTooltip(context, p.abbr!, details.globalPosition);
+                                }
+                              },
+                              child: Container(
+                                decoration: isSelected ? BoxDecoration(
+                                  color: color.withOpacity(0.12),
+                                  borderRadius: BorderRadius.circular(3)) : null,
+                                child: Text(displayText,
+                                    style: TextStyle(fontSize: 16, color: color,
+                                        fontWeight: fw, height: 1.8,
+                                        decoration: isSelected ? TextDecoration.underline : null,
+                                        decorationColor: color))),
+                            );
+                          }
+                          return Text(displayText,
+                              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
+                        }).toList(),
+                      ),
                     ),
                     if (found.isNotEmpty) ...[
                       const SizedBox(height: 14),
@@ -991,12 +1075,23 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                             Clipboard.setData(ClipboardData(text: t));
                             ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                                 content: Text('약어 목록이 복사되었습니다'),
-                                backgroundColor: kBlue,
-                                duration: Duration(seconds: 1)));
+                                backgroundColor: kBlue, duration: Duration(seconds: 1)));
                           }),
                       ]),
                       const SizedBox(height: 4),
-                      ...found.map((a) => _AbbrTile(abbr: a)),
+                      // ★ 11번: 3열 그리드
+                      GridView.builder(
+                        shrinkWrap: true,
+                        physics: const NeverScrollableScrollPhysics(),
+                        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 3,
+                            crossAxisSpacing: 6,
+                            mainAxisSpacing: 6,
+                            childAspectRatio: 1.6),
+                        itemCount: found.length,
+                        itemBuilder: (ctx, i) => _AbbrGridCard(abbr: found[i]),
+                      ),
+                      const SizedBox(height: 16),
                     ],
                   ],
                 ]),
@@ -1007,6 +1102,42 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
       },
     );
   }
+}
+
+// ★ 11번: 3열 그리드용 카드
+class _AbbrGridCard extends StatelessWidget {
+  final AbbreviationModel abbr;
+  const _AbbrGridCard({required this.abbr});
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      border: Border.all(color: const Color(0xFFEEF0F8))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+      Row(children: [
+        Flexible(child: Text(abbr.displayWord,
+            style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 12),
+            overflow: TextOverflow.ellipsis)),
+        if (abbr.isFavorite) const Text('⭐', style: TextStyle(fontSize: 9)),
+      ]),
+      if (abbr.typeLabels.isNotEmpty)
+        Wrap(spacing: 2, children: abbr.typeLabels.map((l) {
+          final color = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
+          return Container(
+            padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(3)),
+            child: Text(l, style: TextStyle(fontSize: 8, color: color, fontWeight: FontWeight.w700)));
+        }).toList()),
+      if (abbr.strokeDisplay.isNotEmpty)
+        Text(abbr.strokeDisplay,
+            style: const TextStyle(fontSize: 9, color: Colors.grey),
+            overflow: TextOverflow.ellipsis, maxLines: 1),
+    ]),
+  );
 }
 
 // ════════════════════════════════════════════════════════
@@ -1027,7 +1158,7 @@ class _SearchScreenState extends State<SearchScreen> {
       builder: (context, box, _) {
         final q   = _ctrl.text.trim();
         final all = Store.getAbbreviations();
-        // ★ 9번: 띄어쓰기, *, 공백 제거 모두 허용
+        // ★ 9번: 띄어쓰기 / * 모두 허용
         var results = q.isEmpty ? all : all.where((a) {
           final qNorm = q.replaceAll(' ', '').replaceAll('*', '');
           final wNorm = a.searchKey.replaceAll(' ', '');
@@ -1050,14 +1181,12 @@ class _SearchScreenState extends State<SearchScreen> {
                     color: _showFavOnly ? const Color(0xFFFFD700).withOpacity(0.15) : kBlueLight,
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
-                        color: _showFavOnly ? const Color(0xFFFFD700) : Colors.transparent,
-                        width: 1.2)),
+                        color: _showFavOnly ? const Color(0xFFFFD700) : Colors.transparent, width: 1.2)),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(Icons.star_rounded, size: 16,
                         color: _showFavOnly ? const Color(0xFFFFD700) : Colors.grey),
                     const SizedBox(width: 4),
-                    Text('즐겨찾기', style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600,
+                    Text('즐겨찾기', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                         color: _showFavOnly ? const Color(0xFFB8860B) : Colors.grey)),
                   ]),
                 ),
@@ -1078,8 +1207,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                     borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                 focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: kBlue)),
-              ))),
+                    borderSide: const BorderSide(color: kBlue))))),
             const SizedBox(height: 8),
             Expanded(child: results.isEmpty
               ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -1115,12 +1243,9 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  // ★ 4번: 초중종 칸을 하나로 통합 (+ 구분자로 여러 값 입력)
-  // ★ 2번: 엔터로 저장
-  // ★ 3번: 팝업 뒤 스크롤 가능 (barrierColor 투명도 조정)
+  // ★ 2번: 엔터로 저장 / ★ 4번: 예시 제거
   void _showEditDialog(BuildContext context, {AbbreviationModel? existing}) {
     final wordCtrl    = TextEditingController(text: existing?.word.replaceAll('*', ' ') ?? '');
-    // 초중종을 하나의 TextField로 통합 (+로 구분)
     final initialCtrl = TextEditingController(
         text: existing?.initial.isNotEmpty == true ? existing!.initial.join('+') : '');
     final medialCtrl  = TextEditingController(
@@ -1132,12 +1257,10 @@ class _SearchScreenState extends State<SearchScreen> {
     bool isAttached   = existing?.isAttached   ?? false;
     bool isFavorite   = existing?.isFavorite   ?? false;
 
-    // ★ 저장 로직 함수화
     Future<void> doSaveFlow(BuildContext ctx, StateSetter setS) async {
       final rawWord = wordCtrl.text.trim();
       if (rawWord.isEmpty) return;
       final word = encodeWord(rawWord);
-      // + 또는 공백으로 분리
       List<String> parseField(String s) =>
           s.split(RegExp(r'[+\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
       final init = parseField(initialCtrl.text);
@@ -1172,91 +1295,100 @@ class _SearchScreenState extends State<SearchScreen> {
       }
     }
 
-    showDialog(
+    // ★ 3번: 팝업 뒤 배경 스크롤 가능하도록 커스텀 다이얼로그
+    showGeneralDialog(
       context: context,
-      // ★ 3번: 팝업 뒤 스크롤 가능하게 barrierColor 설정
+      barrierDismissible: true,
+      barrierLabel: '닫기',
       barrierColor: Colors.black.withOpacity(0.3),
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text(existing == null ? '약어 추가' : '약어 수정',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-        content: SingleChildScrollView(child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _lbl('단어'),
-            TextField(
-              controller: wordCtrl,
-              decoration: _inputDeco(''),
-              // ★ 2번: 마지막 필드에서 엔터 시 저장
-              textInputAction: TextInputAction.next,
-            ),
-            const SizedBox(height: 4),
-            Text('※ 띄어쓰기는 저장 시 * 로 자동 변환됩니다',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
-            const SizedBox(height: 12),
-            // ★ 4번: 초성 - 하나의 칸, +로 구분 입력
-            _lbl('초성'),
-            TextField(
-              controller: initialCtrl,
-              decoration: _inputDeco('예: ㄱ  또는  ㄱ+ㄴ'),
-              textInputAction: TextInputAction.next,
-            ),
-            const SizedBox(height: 8),
-            _lbl('중성'),
-            TextField(
-              controller: medialCtrl,
-              decoration: _inputDeco('예: ㅜ  또는  ㅜ+ㅣ'),
-              textInputAction: TextInputAction.next,
-            ),
-            const SizedBox(height: 8),
-            _lbl('종성'),
-            TextField(
-              controller: finalCtrl,
-              decoration: _inputDeco('예: ㅎ  또는  ㅋ+ㅎ+ㅅ'),
-              // ★ 2번: 마지막 필드에서 엔터 누르면 저장
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => doSaveFlow(ctx, setS),
-            ),
-            const SizedBox(height: 4),
-            Text('※ 종성 ㅋ → 자동으로 (ㅋ) 표시  |  여러 값은 + 로 구분',
-                style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
-            const SizedBox(height: 12),
-            Wrap(spacing: 0, runSpacing: 4, children: [
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                Checkbox(value: isComposite, activeColor: kBlueSky,
-                    onChanged: (v) => setS(() => isComposite = v ?? false)),
-                const Text('합성약어', style: TextStyle(fontSize: 13)),
+      pageBuilder: (ctx, _, __) => StatefulBuilder(
+        builder: (ctx, setS) => Align(
+          alignment: Alignment.center,
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              margin: const EdgeInsets.symmetric(horizontal: 24),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16)),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                Padding(padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
+                    child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      Text(existing == null ? '약어 추가' : '약어 수정',
+                          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                      IconButton(icon: const Icon(Icons.close, size: 18, color: Colors.grey),
+                          onPressed: () => Navigator.pop(ctx)),
+                    ])),
+                Flexible(child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                  child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    _lbl('단어'),
+                    TextField(
+                      controller: wordCtrl,
+                      // ★ 4번: 힌트 없음
+                      decoration: _inputDeco(''),
+                      textInputAction: TextInputAction.next),
+                    const SizedBox(height: 4),
+                    Text('※ 띄어쓰기는 저장 시 * 로 자동 변환됩니다',
+                        style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                    const SizedBox(height: 12),
+                    _lbl('초성'),
+                    TextField(
+                      controller: initialCtrl,
+                      // ★ 4번: 예시 제거
+                      decoration: _inputDeco(''),
+                      textInputAction: TextInputAction.next),
+                    const SizedBox(height: 8),
+                    _lbl('중성'),
+                    TextField(
+                      controller: medialCtrl,
+                      decoration: _inputDeco(''),
+                      textInputAction: TextInputAction.next),
+                    const SizedBox(height: 8),
+                    _lbl('종성'),
+                    TextField(
+                      controller: finalCtrl,
+                      decoration: _inputDeco(''),
+                      // ★ 2번: 엔터로 저장
+                      textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => doSaveFlow(ctx, setS)),
+                    const SizedBox(height: 4),
+                    Text('※ 종성 ㅋ → 자동으로 (ㅋ) 표시  |  여러 값은 + 로 구분',
+                        style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                    const SizedBox(height: 14),
+                    // ★ 10번: 토글 버튼 스타일 체크박스 (각 항목 색 적용)
+                    _TypeToggleRow(
+                      isComposite: isComposite,
+                      isConcurrent: isConcurrent,
+                      isAttached: isAttached,
+                      isFavorite: isFavorite,
+                      onCompositeChanged: (v) => setS(() => isComposite = v),
+                      onConcurrentChanged: (v) => setS(() => isConcurrent = v),
+                      onAttachedChanged: (v) => setS(() => isAttached = v),
+                      onFavoriteChanged: (v) => setS(() => isFavorite = v),
+                    ),
+                    const SizedBox(height: 8),
+                  ]),
+                )),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+                    TextButton(onPressed: () => Navigator.pop(ctx),
+                        child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: kBlue, foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+                      onPressed: () => doSaveFlow(ctx, setS),
+                      child: const Text('다음')),
+                  ]),
+                ),
               ]),
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                Checkbox(value: isConcurrent, activeColor: kPurple,
-                    onChanged: (v) => setS(() => isConcurrent = v ?? false)),
-                const Text('동시처리', style: TextStyle(fontSize: 13)),
-              ]),
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                Checkbox(value: isAttached, activeColor: kBlueDark,
-                    onChanged: (v) => setS(() => isAttached = v ?? false)),
-                const Text('붙여쓰기', style: TextStyle(fontSize: 13)),
-              ]),
-              Row(mainAxisSize: MainAxisSize.min, children: [
-                Checkbox(value: isFavorite, activeColor: kBlue,
-                    onChanged: (v) => setS(() => isFavorite = v ?? false)),
-                const Text('즐겨찾기', style: TextStyle(fontSize: 13)),
-              ]),
-            ]),
-          ],
-        )),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx),
-              child: const Text('취소', style: TextStyle(color: Colors.grey))),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(
-                backgroundColor: kBlue, foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-            onPressed: () => doSaveFlow(ctx, setS),
-            child: const Text('다음')),
-        ],
-      )),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -1268,9 +1400,9 @@ class _SearchScreenState extends State<SearchScreen> {
       word: word, initial: init, medial: med, final_: fin,
       isComposite: isComposite, isConcurrent: isConcurrent,
       isAttached: isAttached, isFavorite: isFavorite));
-    // ★ 5번: 약어 등록 후 문장 분석 즉시 재적용
+    // ★ 5번: 등록 후 즉시 재분석
     if (_analyzerAnalyzed) {
-      _analyzerAnalyzed = true; // 재분석 트리거
+      _analyzerAnalyzed = true;
     }
   }
 
@@ -1288,6 +1420,59 @@ class _SearchScreenState extends State<SearchScreen> {
             child: const Text('삭제')),
       ]));
   }
+}
+
+// ★ 10번: 분류 토글 버튼 행
+class _TypeToggleRow extends StatelessWidget {
+  final bool isComposite, isConcurrent, isAttached, isFavorite;
+  final ValueChanged<bool> onCompositeChanged, onConcurrentChanged, onAttachedChanged, onFavoriteChanged;
+  const _TypeToggleRow({
+    required this.isComposite, required this.isConcurrent,
+    required this.isAttached, required this.isFavorite,
+    required this.onCompositeChanged, required this.onConcurrentChanged,
+    required this.onAttachedChanged, required this.onFavoriteChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) => Wrap(spacing: 6, runSpacing: 6, children: [
+    _ToggleChip(label: '합성약어', color: kBlueSky, selected: isComposite, onTap: () => onCompositeChanged(!isComposite)),
+    _ToggleChip(label: '동시처리', color: kPurple, selected: isConcurrent, onTap: () => onConcurrentChanged(!isConcurrent)),
+    _ToggleChip(label: '붙여쓰기', color: kBlueDark, selected: isAttached, onTap: () => onAttachedChanged(!isAttached)),
+    _ToggleChip(
+      label: '즐겨찾기', color: const Color(0xFFFFD700),
+      selected: isFavorite, onTap: () => onFavoriteChanged(!isFavorite),
+      icon: Icons.star_rounded),
+  ]);
+}
+
+class _ToggleChip extends StatelessWidget {
+  final String label;
+  final Color color;
+  final bool selected;
+  final VoidCallback onTap;
+  final IconData? icon;
+  const _ToggleChip({required this.label, required this.color, required this.selected, required this.onTap, this.icon});
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: selected ? color.withOpacity(0.15) : const Color(0xFFF5F5F5),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: selected ? color : Colors.transparent, width: 1.5)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (icon != null) ...[
+          Icon(icon, size: 14, color: selected ? color : Colors.grey),
+          const SizedBox(width: 4),
+        ],
+        Text(label, style: TextStyle(
+            fontSize: 12, fontWeight: FontWeight.w600,
+            color: selected ? color : Colors.grey)),
+      ]),
+    ),
+  );
 }
 
 // ════════════════════════════════════════════════════════
@@ -1346,8 +1531,7 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                       borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: kBlue)),
-                ),
+                      borderSide: const BorderSide(color: kBlue))),
               ),
               const SizedBox(height: 8),
               SizedBox(width: double.infinity, child: ElevatedButton(
@@ -1414,11 +1598,15 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
 }
 
 // ════════════════════════════════════════════════════════
-// 리마인드
+// 리마인드 (★ 9번: 탭에서 직접 추가 + 약어/문장 불러오기)
 // ════════════════════════════════════════════════════════
-class RemindersScreen extends StatelessWidget {
+class RemindersScreen extends StatefulWidget {
   const RemindersScreen({super.key});
+  @override State<RemindersScreen> createState() => _RemindersScreenState();
+}
+class _RemindersScreenState extends State<RemindersScreen> {
   String _tl(String t) => t == 'word' ? '약어' : t == 'favorite' ? '즐겨찾기' : '문장';
+
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
@@ -1429,13 +1617,33 @@ class RemindersScreen extends StatelessWidget {
           backgroundColor: Colors.white,
           body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('리마인드', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-              Text('${reminders.length}개', style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Text('리마인드', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                Text('${reminders.length}개', style: const TextStyle(fontSize: 13, color: Colors.grey)),
+              ]),
+              // ★ 9번: 추가 버튼
+              ElevatedButton.icon(
+                onPressed: () => _showAddReminderDialog(context),
+                icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: kBlue, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
             ])),
             Expanded(child: reminders.isEmpty
-              ? const Center(child: Text('설정된 리마인드가 없습니다',
-                  style: TextStyle(color: Colors.grey, fontSize: 14)))
+              ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  const Text('설정된 리마인드가 없습니다',
+                      style: TextStyle(color: Colors.grey, fontSize: 14)),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    onPressed: () => _showAddReminderDialog(context),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: kBlue, side: const BorderSide(color: kBlue),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
+                    child: const Text('리마인드 추가하기',
+                        style: TextStyle(fontWeight: FontWeight.w700))),
+                ]))
               : ListView.builder(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   itemCount: reminders.length,
@@ -1470,10 +1678,145 @@ class RemindersScreen extends StatelessWidget {
         );
       });
   }
+
+  // ★ 9번: 리마인드 직접 추가 (약어/문장 불러오기)
+  void _showAddReminderDialog(BuildContext context) {
+    int interval = 1;
+    bool repeat = false;
+    String type = 'word'; // 'word' or 'sentence'
+    String? selectedTarget;
+    String customText = '';
+    bool useCustom = false;
+    final customCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) {
+          final abbrevs = Store.getAbbreviations();
+          final sentences = Store.getSentences();
+          final items = type == 'word'
+              ? abbrevs.map((a) => a.displayWord).toList()
+              : sentences.map((s) => s.text).toList();
+
+          return AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Text('리마인드 추가', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              // 유형 선택
+              _lbl('유형'),
+              Row(children: [
+                Expanded(child: GestureDetector(
+                  onTap: () => setS(() { type = 'word'; selectedTarget = null; }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: type == 'word' ? kBlue : kBlueLight,
+                      borderRadius: BorderRadius.circular(8)),
+                    child: Center(child: Text('약어', style: TextStyle(
+                        color: type == 'word' ? Colors.white : kBlue,
+                        fontWeight: FontWeight.w700)))),
+                )),
+                const SizedBox(width: 8),
+                Expanded(child: GestureDetector(
+                  onTap: () => setS(() { type = 'sentence'; selectedTarget = null; }),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: type == 'sentence' ? kBlue : kBlueLight,
+                      borderRadius: BorderRadius.circular(8)),
+                    child: Center(child: Text('문장', style: TextStyle(
+                        color: type == 'sentence' ? Colors.white : kBlue,
+                        fontWeight: FontWeight.w700)))),
+                )),
+              ]),
+              const SizedBox(height: 12),
+              // 항목 선택
+              _lbl(type == 'word' ? '약어 선택' : '문장 선택'),
+              if (items.isEmpty)
+                Padding(padding: const EdgeInsets.only(bottom: 8),
+                    child: Text(type == 'word' ? '등록된 약어가 없습니다' : '등록된 문장이 없습니다',
+                        style: const TextStyle(color: Colors.grey, fontSize: 12)))
+              else
+                Container(
+                  height: 120,
+                  decoration: BoxDecoration(
+                    border: Border.all(color: const Color(0xFFE0E0E0)),
+                    borderRadius: BorderRadius.circular(8)),
+                  child: ListView.builder(
+                    itemCount: items.length,
+                    itemBuilder: (_, i) {
+                      final item = items[i];
+                      final isSel = selectedTarget == item;
+                      return GestureDetector(
+                        onTap: () => setS(() { selectedTarget = item; useCustom = false; customCtrl.clear(); }),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          color: isSel ? kBlueLight : Colors.transparent,
+                          child: Text(item,
+                              style: TextStyle(fontSize: 13,
+                                  color: isSel ? kBlue : Colors.black87,
+                                  fontWeight: isSel ? FontWeight.w600 : FontWeight.w400),
+                              maxLines: 2, overflow: TextOverflow.ellipsis)));
+                    })),
+              const SizedBox(height: 8),
+              // 직접 입력
+              Row(children: [
+                Checkbox(value: useCustom, activeColor: kBlue,
+                    onChanged: (v) => setS(() { useCustom = v ?? false; if (useCustom) selectedTarget = null; })),
+                const Text('직접 입력', style: TextStyle(fontSize: 13)),
+              ]),
+              if (useCustom) TextField(
+                controller: customCtrl,
+                onChanged: (v) => setS(() => customText = v),
+                decoration: _inputDeco('내용을 입력하세요'),
+              ),
+              const SizedBox(height: 12),
+              // 간격
+              _lbl('간격'),
+              Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(
+                onTap: () => setS(() => interval = d),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: interval == d ? kBlue : kBlueLight,
+                    borderRadius: BorderRadius.circular(20)),
+                  child: Text('$d일', style: TextStyle(
+                    color: interval == d ? Colors.white : kBlue,
+                    fontWeight: FontWeight.w700))),
+              )).toList()),
+              const SizedBox(height: 10),
+              Row(children: [
+                Checkbox(value: repeat, activeColor: kBlue,
+                    onChanged: (v) => setS(() => repeat = v ?? false)),
+                const Text('반복'),
+              ]),
+            ])),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx),
+                  child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: () async {
+                  final target = useCustom ? customCtrl.text.trim() : selectedTarget;
+                  if (target == null || target.isEmpty) return;
+                  final date = DateTime.now().add(Duration(days: interval));
+                  final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+                  await Store.saveReminder(ReminderModel(
+                    id: DateTime.now().millisecondsSinceEpoch.toString(),
+                    type: type, target: target, date: ds,
+                    intervalDays: interval, repeat: repeat));
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+                child: const Text('설정')),
+            ],
+          );
+        }));
+  }
 }
 
 // ════════════════════════════════════════════════════════
-// 공통 위젯 - ★ 1번: 타입 레이블 모두 표시
+// 공통 위젯 (★ 1번, 13번 반영)
 // ════════════════════════════════════════════════════════
 class _AbbrTile extends StatelessWidget {
   final AbbreviationModel abbr;
@@ -1491,7 +1834,6 @@ class _AbbrTile extends StatelessWidget {
         Text(abbr.displayWord, style: TextStyle(
             color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
         if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
-        // ★ 모든 타입 레이블 표시
         ...abbr.typeLabels.map((label) {
           final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
           final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
@@ -1503,16 +1845,58 @@ class _AbbrTile extends StatelessWidget {
         }),
       ]),
       const SizedBox(height: 4),
-      SelectableText(abbr.strokeDisplay,
-          style: const TextStyle(fontSize: 12, color: Colors.grey)),
+      SelectableText(abbr.strokeDisplay, style: const TextStyle(fontSize: 12, color: Colors.grey)),
     ]),
   );
 }
 
-class _AbbrListTile extends StatelessWidget {
+// ★ 13번: 더보기 메뉴 항목 선택 후 자동 닫힘 방지
+class _AbbrListTile extends StatefulWidget {
   final AbbreviationModel abbr;
   final VoidCallback? onFav, onEdit, onDelete, onRemind;
   const _AbbrListTile({required this.abbr, this.onFav, this.onEdit, this.onDelete, this.onRemind});
+  @override State<_AbbrListTile> createState() => _AbbrListTileState();
+}
+class _AbbrListTileState extends State<_AbbrListTile> {
+  final _menuKey = GlobalKey();
+  bool _menuOpen = false;
+
+  void _openMenu() {
+    final box = _menuKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final pos = box.localToGlobal(Offset.zero);
+    final size = box.size;
+    setState(() => _menuOpen = true);
+
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        pos.dx, pos.dy + size.height,
+        pos.dx + size.width, pos.dy + size.height + 200),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      // ★ 항목 선택해도 자동으로 닫히지 않음 — 빈 곳 터치로만 닫힘
+      items: [
+        PopupMenuItem(
+          value: 'fav',
+          child: Text(widget.abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가')),
+        if (widget.onEdit != null)
+          const PopupMenuItem(value: 'edit', child: Text('✏️ 수정')),
+        if (widget.onRemind != null)
+          const PopupMenuItem(value: 'remind', child: Text('🔔 리마인드 설정')),
+        if (widget.onDelete != null)
+          const PopupMenuItem(value: 'delete',
+              child: Text('🗑 삭제', style: TextStyle(color: Colors.red))),
+      ],
+    ).then((v) {
+      setState(() => _menuOpen = false);
+      if (v == null) return;
+      if (v == 'fav'    && widget.onFav    != null) widget.onFav!();
+      if (v == 'edit'   && widget.onEdit   != null) widget.onEdit!();
+      if (v == 'delete' && widget.onDelete != null) widget.onDelete!();
+      if (v == 'remind' && widget.onRemind != null) widget.onRemind!();
+    });
+  }
+
   @override
   Widget build(BuildContext context) => Container(
     margin: const EdgeInsets.only(bottom: 8),
@@ -1522,13 +1906,12 @@ class _AbbrListTile extends StatelessWidget {
     child: Row(children: [
       Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
-          if (abbr.isAttached) const Text('↙ ',
+          if (widget.abbr.isAttached) const Text('↙ ',
               style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
-          Text(abbr.displayWord, style: TextStyle(
-              color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
-          if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
-          // ★ 모든 타입 레이블 표시
-          ...abbr.typeLabels.map((label) {
+          Text(widget.abbr.displayWord, style: TextStyle(
+              color: widget.abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
+          if (widget.abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
+          ...widget.abbr.typeLabels.map((label) {
             final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
             final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
             return Container(
@@ -1539,26 +1922,18 @@ class _AbbrListTile extends StatelessWidget {
           }),
         ]),
         const SizedBox(height: 4),
-        SelectableText(abbr.strokeDisplay,
+        SelectableText(widget.abbr.strokeDisplay,
             style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ])),
-      PopupMenuButton<String>(
-        icon: const Icon(Icons.more_horiz, color: Colors.grey),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        onSelected: (v) {
-          if (v == 'fav'    && onFav    != null) onFav!();
-          if (v == 'edit'   && onEdit   != null) onEdit!();
-          if (v == 'delete' && onDelete != null) onDelete!();
-          if (v == 'remind' && onRemind != null) onRemind!();
-        },
-        itemBuilder: (_) => [
-          PopupMenuItem(value: 'fav',
-              child: Text(abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가')),
-          if (onEdit   != null) const PopupMenuItem(value: 'edit',   child: Text('✏️ 수정')),
-          if (onRemind != null) const PopupMenuItem(value: 'remind', child: Text('🔔 리마인드 설정')),
-          if (onDelete != null) const PopupMenuItem(value: 'delete',
-              child: Text('🗑 삭제', style: TextStyle(color: Colors.red))),
-        ]),
+      // ★ 13번: 커스텀 더보기 버튼
+      GestureDetector(
+        key: _menuKey,
+        onTap: _openMenu,
+        child: Container(
+          padding: const EdgeInsets.all(6),
+          child: Icon(Icons.more_horiz,
+              color: _menuOpen ? kBlue : Colors.grey)),
+      ),
     ]),
   );
 }
