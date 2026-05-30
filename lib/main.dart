@@ -218,12 +218,36 @@ class StudyTimer extends ChangeNotifier {
   }
 }
 
-// ── 문장 분석 (으(므)로 / 와(과) 실시간 치환) ──────────────────────────
+// ── 문장 분석 ──────────────────────────────────────────────────────────
 class _Span {
   final String text, type;
   final AbbreviationModel? abbr;
   final String? resolvedText;
   const _Span({required this.text, required this.type, this.abbr, this.resolvedText});
+}
+
+// 와/과/으/므 로 시작하는 유연 약어 판별
+bool _isFlexibleAbbr(String word) =>
+    word.startsWith('와') || word.startsWith('과') ||
+    word.startsWith('으') || word.startsWith('므');
+
+// 두 가지 변형 반환 (와↔과, 으↔므)
+List<String> _flexVariants(String word) {
+  if (word.startsWith('와')) return [word, '과' + word.substring(1)];
+  if (word.startsWith('과')) return [word, '와' + word.substring(1)];
+  if (word.startsWith('으')) return [word, '므' + word.substring(1)];
+  if (word.startsWith('므')) return [word, '으' + word.substring(1)];
+  return [word];
+}
+
+// 받침 없으면 와/므, 받침 있으면 과/으
+String _resolveFlexVariant(String word, String prevChar) {
+  final hasFinal = _hasFinalConsonant(prevChar);
+  if (word.startsWith('와') || word.startsWith('과'))
+    return hasFinal ? '과' + word.substring(1) : '와' + word.substring(1);
+  if (word.startsWith('으') || word.startsWith('므'))
+    return hasFinal ? '으' + word.substring(1) : '므' + word.substring(1);
+  return word;
 }
 
 List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
@@ -233,55 +257,35 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
 
   for (final a in sorted) {
     final next = <_Span>[];
-    final isFlexible = a.word.contains('으(므)로') || a.word.contains('와(과)');
+    final flexible = _isFlexibleAbbr(a.word);
+    final searchVariants = flexible ? _flexVariants(a.word) : [a.word];
 
-    if (isFlexible) {
-      final variants = <String>{};
-      if (a.word.contains('으(므)로')) {
-        variants.add(a.word.replaceAll('으(므)로', '므로'));
-        variants.add(a.word.replaceAll('으(므)로', '으로'));
-      }
-      if (a.word.contains('와(과)')) {
-        variants.add(a.word.replaceAll('와(과)', '과'));
-        variants.add(a.word.replaceAll('와(과)', '와'));
-      }
-      variants.add(a.word);
-      final sortedV = variants.toList()..sort((x, y) => y.length.compareTo(x.length));
-
-      for (final p in parts) {
-        if (p.type != 'normal') { next.add(p); continue; }
-        bool matched = false;
-        for (final variant in sortedV) {
-          if (p.text.contains(variant)) {
-            final segs = p.text.split(variant);
-            for (int i = 0; i < segs.length; i++) {
-              if (segs[i].isNotEmpty) next.add(_Span(text: segs[i], type: 'normal'));
-              if (i < segs.length - 1) {
-                String type = 'abbr';
-                if (a.isConcurrent) type = 'concurrent';
-                else if (a.isComposite) type = 'composite';
-                next.add(_Span(text: variant, type: type, abbr: a, resolvedText: variant));
-              }
-            }
-            matched = true; break;
-          }
-        }
-        if (!matched) next.add(p);
-      }
-    } else {
-      for (final p in parts) {
-        if (p.type != 'normal') { next.add(p); continue; }
-        final segs = p.text.split(a.word);
+    for (final p in parts) {
+      if (p.type != 'normal') { next.add(p); continue; }
+      bool matched = false;
+      for (final variant in searchVariants) {
+        if (!p.text.contains(variant)) continue;
+        final segs = p.text.split(variant);
         for (int i = 0; i < segs.length; i++) {
           if (segs[i].isNotEmpty) next.add(_Span(text: segs[i], type: 'normal'));
           if (i < segs.length - 1) {
-            String type = 'abbr';
-            if (a.isConcurrent) type = 'concurrent';
-            else if (a.isComposite) type = 'composite';
-            next.add(_Span(text: a.word, type: type, abbr: a, resolvedText: a.word));
+            String spanType = 'abbr';
+            if (a.isConcurrent) spanType = 'concurrent';
+            else if (a.isComposite) spanType = 'composite';
+            // 앞 글자 받침 보고 올바른 형태로 치환
+            String prevChar = '';
+            if (next.isNotEmpty) {
+              final prevText = next.last.resolvedText ?? next.last.text;
+              if (prevText.isNotEmpty) prevChar = prevText[prevText.length - 1];
+            }
+            final resolved = flexible ? _resolveFlexVariant(a.word, prevChar) : variant;
+            next.add(_Span(text: variant, type: spanType, abbr: a, resolvedText: resolved));
           }
         }
+        matched = true;
+        break;
       }
+      if (!matched) next.add(p);
     }
     parts = next;
   }
