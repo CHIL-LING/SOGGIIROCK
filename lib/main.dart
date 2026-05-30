@@ -1201,10 +1201,7 @@ class _ToggleChip extends StatelessWidget {
       ])));
 }
 
-// ── 더보기 메뉴 (빈 곳 터치로만 닫힘) ──────────────────────────────────
-class _MenuItem { final String label; final VoidCallback onTap; final bool isDestructive;
-  const _MenuItem({required this.label, required this.onTap, this.isDestructive = false}); }
-
+// ── 더보기 메뉴 ──────────────────────────────────────────────────────────
 class _AbbrListTile extends StatefulWidget {
   final AbbreviationModel abbr;
   final VoidCallback? onFav, onEdit, onDelete, onRemind;
@@ -1212,47 +1209,7 @@ class _AbbrListTile extends StatefulWidget {
   @override State<_AbbrListTile> createState() => _AbbrListTileState();
 }
 class _AbbrListTileState extends State<_AbbrListTile> {
-  OverlayEntry? _menuOverlay;
-  bool _menuOpen = false;
-
-  void _openMenu(BuildContext btnCtx) {
-    if (_menuOpen) { _closeMenu(); return; }
-    final box = btnCtx.findRenderObject() as RenderBox;
-    final offset = box.localToGlobal(Offset(box.size.width, box.size.height));
-    final screenW = MediaQuery.of(btnCtx).size.width;
-    final items = [
-      _MenuItem(label: widget.abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가',
-          onTap: () { _closeMenu(); widget.onFav?.call(); }),
-      if (widget.onEdit != null) _MenuItem(label: '✏️ 수정', onTap: () { _closeMenu(); widget.onEdit!(); }),
-      if (widget.onRemind != null) _MenuItem(label: '🔔 리마인드 설정', onTap: () { _closeMenu(); widget.onRemind!(); }),
-      if (widget.onDelete != null) _MenuItem(label: '🗑 삭제', isDestructive: true,
-          onTap: () { _closeMenu(); widget.onDelete!(); }),
-    ];
-    _menuOverlay = OverlayEntry(builder: (_) => Stack(children: [
-      Positioned.fill(child: GestureDetector(onTap: _closeMenu, behavior: HitTestBehavior.translucent,
-          child: const SizedBox.expand())),
-      Positioned(right: screenW - offset.dx, top: offset.dy,
-        child: Material(color: Colors.transparent, child: Container(
-          constraints: const BoxConstraints(minWidth: 160),
-          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 12, offset: const Offset(0,4))],
-            border: Border.all(color: const Color(0xFFF0F0F0))),
-          child: Column(mainAxisSize: MainAxisSize.min,
-            children: items.map((item) => GestureDetector(onTap: item.onTap,
-              child: Container(width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Text(item.label, style: TextStyle(fontSize: 14,
-                    color: item.isDestructive ? Colors.red : Colors.black87))))).toList())))),
-    ]));
-    Overlay.of(btnCtx).insert(_menuOverlay!);
-    setState(() => _menuOpen = true);
-  }
-
-  void _closeMenu() {
-    _menuOverlay?.remove(); _menuOverlay = null;
-    if (mounted) setState(() => _menuOpen = false);
-  }
-  @override void dispose() { _closeMenu(); super.dispose(); }
+  final _menuKey = GlobalKey<PopupMenuButtonState>();
 
   @override
   Widget build(BuildContext context) => Container(
@@ -1277,9 +1234,25 @@ class _AbbrListTileState extends State<_AbbrListTile> {
         const SizedBox(height: 4),
         SelectableText(widget.abbr.strokeDisplay, style: const TextStyle(fontSize: 12, color: Colors.grey)),
       ])),
-      Builder(builder: (btnCtx) => GestureDetector(onTap: () => _openMenu(btnCtx),
-        child: Container(padding: const EdgeInsets.all(6),
-          child: Icon(Icons.more_horiz, color: _menuOpen ? kBlue : Colors.grey)))),
+      // 더보기: PopupMenuButton, 항목 선택 후 수동으로 닫히지 않음 (빈 곳 클릭으로만 닫힘)
+      PopupMenuButton<String>(
+        key: _menuKey,
+        icon: const Icon(Icons.more_horiz, color: Colors.grey),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        // onSelected 없음 → 항목 눌러도 자동으로 안 닫힘
+        itemBuilder: (_) => [
+          PopupMenuItem(
+            child: Text(widget.abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가'),
+            onTap: () => widget.onFav?.call()),
+          if (widget.onEdit != null)
+            PopupMenuItem(child: const Text('✏️ 수정'), onTap: () => widget.onEdit?.call()),
+          if (widget.onRemind != null)
+            PopupMenuItem(child: const Text('🔔 리마인드 설정'), onTap: () => widget.onRemind?.call()),
+          if (widget.onDelete != null)
+            PopupMenuItem(
+              child: const Text('🗑 삭제', style: TextStyle(color: Colors.red)),
+              onTap: () => widget.onDelete?.call()),
+        ]),
     ]));
 }
 
