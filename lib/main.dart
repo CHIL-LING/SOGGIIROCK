@@ -226,27 +226,32 @@ class _Span {
   const _Span({required this.text, required this.type, this.abbr, this.resolvedText});
 }
 
-// 와/과/으/므 로 시작하는 유연 약어 판별
+// 와/과/으/므/을/를 로 시작하는 유연 약어 판별
 bool _isFlexibleAbbr(String word) =>
     word.startsWith('와') || word.startsWith('과') ||
-    word.startsWith('으') || word.startsWith('므');
+    word.startsWith('으') || word.startsWith('므') ||
+    word.startsWith('을') || word.startsWith('를');
 
-// 두 가지 변형 반환 (와↔과, 으↔므)
+// 두 가지 변형 반환 (와↔과, 으↔므, 을↔를)
 List<String> _flexVariants(String word) {
   if (word.startsWith('와')) return [word, '과' + word.substring(1)];
   if (word.startsWith('과')) return [word, '와' + word.substring(1)];
   if (word.startsWith('으')) return [word, '므' + word.substring(1)];
   if (word.startsWith('므')) return [word, '으' + word.substring(1)];
+  if (word.startsWith('을')) return [word, '를' + word.substring(1)];
+  if (word.startsWith('를')) return [word, '을' + word.substring(1)];
   return [word];
 }
 
-// 받침 없으면 와/므, 받침 있으면 과/으
+// 받침 없으면 와/므/를, 받침 있으면 과/으/을
 String _resolveFlexVariant(String word, String prevChar) {
   final hasFinal = _hasFinalConsonant(prevChar);
   if (word.startsWith('와') || word.startsWith('과'))
     return hasFinal ? '과' + word.substring(1) : '와' + word.substring(1);
   if (word.startsWith('으') || word.startsWith('므'))
     return hasFinal ? '으' + word.substring(1) : '므' + word.substring(1);
+  if (word.startsWith('을') || word.startsWith('를'))
+    return hasFinal ? '을' + word.substring(1) : '를' + word.substring(1);
   return word;
 }
 
