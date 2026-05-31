@@ -905,27 +905,14 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                     Container(width: double.infinity, padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
                           borderRadius: BorderRadius.circular(12), border: Border.all(color: kBlueLight)),
-                      child: Wrap(children: parts.map((p) {
-                        Color color = Colors.black87; FontWeight fw = FontWeight.w400;
-                        if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
-                        if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
-                        if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
-                        final displayText = (p.resolvedText ?? p.text) + (p.abbr?.isFavorite == true ? '⭐' : '');
-                        if (p.abbr != null) {
-                          final isSelected = _selectedAbbr?.id == p.abbr!.id;
-                          return GestureDetector(
-                            onTapUp: (details) {
-                              if (isSelected) { _closeTooltip(); }
-                              else { _showAbbrTooltip(context, p.abbr!, details.globalPosition); }
-                            },
-                            child: Container(
-                              decoration: isSelected ? BoxDecoration(color: color.withOpacity(0.12),
-                                  borderRadius: BorderRadius.circular(3)) : null,
-                              child: Text(displayText, style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8,
-                                  decoration: isSelected ? TextDecoration.underline : null, decorationColor: color))));
-                        }
-                        return Text(displayText, style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
-                      }).toList())),
+                      child: _AnalysisTextView(
+                        parts: parts,
+                        selectedAbbr: _selectedAbbr,
+                        onAbbrTap: (abbr, pos) {
+                          if (_selectedAbbr?.id == abbr.id) { _closeTooltip(); }
+                          else { _showAbbrTooltip(context, abbr, pos); }
+                        },
+                      )),
                     if (found.isNotEmpty) ...[
                       const SizedBox(height: 14),
                       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
@@ -954,6 +941,57 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
       });
   }
 }
+
+// 약어 추출 결과 텍스트 — RichText 기반으로 자연스러운 줄바꿈
+class _AnalysisTextView extends StatelessWidget {
+  final List<_Span> parts;
+  final AbbreviationModel? selectedAbbr;
+  final void Function(AbbreviationModel, Offset) onAbbrTap;
+  const _AnalysisTextView({required this.parts, required this.selectedAbbr, required this.onAbbrTap});
+
+  @override
+  Widget build(BuildContext context) {
+    // 약어가 없는 일반 텍스트만 있으면 SelectableText.rich 사용
+    final hasAbbr = parts.any((p) => p.abbr != null);
+    if (!hasAbbr) {
+      return SelectableText.rich(TextSpan(
+        children: parts.map((p) => TextSpan(
+          text: p.resolvedText ?? p.text,
+          style: const TextStyle(fontSize: 16, color: Colors.black87, height: 1.8))).toList()));
+    }
+
+    // 약어 클릭이 필요할 때는 Text.rich + TapGestureRecognizer
+    return Text.rich(TextSpan(
+      children: parts.map((p) {
+        Color color = Colors.black87;
+        FontWeight fw = FontWeight.w400;
+        if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
+        if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
+        if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
+        final displayText = (p.resolvedText ?? p.text) + (p.abbr?.isFavorite == true ? '⭐' : '');
+        final isSelected = selectedAbbr?.id == p.abbr?.id && p.abbr != null;
+
+        if (p.abbr != null) {
+          return WidgetSpan(
+            alignment: PlaceholderAlignment.baseline,
+            baseline: TextBaseline.alphabetic,
+            child: GestureDetector(
+              onTapUp: (details) => onAbbrTap(p.abbr!, details.globalPosition),
+              child: Container(
+                decoration: isSelected ? BoxDecoration(
+                    color: color.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(3)) : null,
+                child: Text(displayText, style: TextStyle(
+                    fontSize: 16, color: color, fontWeight: fw, height: 1.8,
+                    decoration: isSelected ? TextDecoration.underline : null,
+                    decorationColor: color)))));
+        }
+        return TextSpan(text: displayText,
+            style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
+      }).toList()));
+  }
+}
+
 
 class _AbbrGridCard extends StatelessWidget {
   final AbbreviationModel abbr;
