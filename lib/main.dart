@@ -44,7 +44,7 @@ class AbbreviationModel {
   });
 
   String get searchKey => decodeWordForSearch(word);
-  String get displayWord => word.replaceAll('*', ' ');
+  String get displayWord => word; // * 그대로 표시
 
   Map<String, dynamic> toMap() => {
     'id': id, 'word': word, 'initial': initial, 'medial': medial, 'final_': final_,
@@ -800,7 +800,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
             boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 12, offset: const Offset(0,3))]),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
-              Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
+              Text(abbr.displayWord.replaceAll('*', ' '), style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
               if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 10)),
               ...abbr.typeLabels.map((l) {
                 final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
@@ -965,7 +965,7 @@ class _AbbrGridCard extends StatelessWidget {
         border: Border.all(color: const Color(0xFFEEF0F8))),
     child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
       Row(children: [
-        Flexible(child: Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 12), overflow: TextOverflow.ellipsis)),
+        Flexible(child: Text(abbr.displayWord.replaceAll('*', ' '), style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 12), overflow: TextOverflow.ellipsis)),
         if (abbr.isFavorite) const Text('⭐', style: TextStyle(fontSize: 9)),
       ]),
       if (abbr.typeLabels.isNotEmpty) Wrap(spacing: 2, children: abbr.typeLabels.map((l) {
