@@ -277,17 +277,17 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
             String spanType = 'abbr';
             if (a.isConcurrent) spanType = 'concurrent';
             else if (a.isComposite) spanType = 'composite';
-            // 앞 글자 받침 보고 올바른 형태로 치환 (* 제거 후 마지막 한글 글자 찾기)
+            // 앞 글자 받침 보고 올바른 형태로 치환
             String prevChar = '';
-            if (next.isNotEmpty) {
-              final prevText = (next.last.resolvedText ?? next.last.text).replaceAll('*', ' ');
-              final trimmed = prevText.trimRight();
-              if (trimmed.isNotEmpty) prevChar = trimmed[trimmed.length - 1];
-            }
-            // 현재 span 앞 세그먼트도 확인
-            if (prevChar.isEmpty && segs[i].isNotEmpty) {
-              final seg = segs[i].replaceAll('*', ' ').trimRight();
+            // 현재 세그먼트(약어 앞 텍스트)에서 먼저 찾기
+            if (segs[i].isNotEmpty) {
+              final seg = segs[i].replaceAll('*', '');
               if (seg.isNotEmpty) prevChar = seg[seg.length - 1];
+            }
+            // 세그먼트가 비었으면 이전 span에서 찾기
+            if (prevChar.isEmpty && next.isNotEmpty) {
+              final prevText = (next.last.resolvedText ?? next.last.text).replaceAll('*', '');
+              if (prevText.isNotEmpty) prevChar = prevText[prevText.length - 1];
             }
             final resolved = flexible ? _resolveFlexVariant(a.word, prevChar) : variant;
             next.add(_Span(text: variant, type: spanType, abbr: a, resolvedText: resolved));
