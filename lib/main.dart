@@ -277,11 +277,17 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
             String spanType = 'abbr';
             if (a.isConcurrent) spanType = 'concurrent';
             else if (a.isComposite) spanType = 'composite';
-            // 앞 글자 받침 보고 올바른 형태로 치환
+            // 앞 글자 받침 보고 올바른 형태로 치환 (* 제거 후 마지막 한글 글자 찾기)
             String prevChar = '';
             if (next.isNotEmpty) {
-              final prevText = next.last.resolvedText ?? next.last.text;
-              if (prevText.isNotEmpty) prevChar = prevText[prevText.length - 1];
+              final prevText = (next.last.resolvedText ?? next.last.text).replaceAll('*', ' ');
+              final trimmed = prevText.trimRight();
+              if (trimmed.isNotEmpty) prevChar = trimmed[trimmed.length - 1];
+            }
+            // 현재 span 앞 세그먼트도 확인
+            if (prevChar.isEmpty && segs[i].isNotEmpty) {
+              final seg = segs[i].replaceAll('*', ' ').trimRight();
+              if (seg.isNotEmpty) prevChar = seg[seg.length - 1];
             }
             final resolved = flexible ? _resolveFlexVariant(a.word, prevChar) : variant;
             next.add(_Span(text: variant, type: spanType, abbr: a, resolvedText: resolved));
@@ -375,6 +381,29 @@ class _MainShellState extends State<MainShell> {
     HomeScreen(), SentenceAnalyzerScreen(), SearchScreen(),
     SentenceRegisterScreen(), RemindersScreen(),
   ];
+
+  @override
+  void initState() {
+    super.initState();
+    // 앱 시작 시 오늘 리마인드 체크
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkTodayReminders());
+  }
+
+  void _checkTodayReminders() {
+    final today = _todayStr();
+    final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
+    if (reminders.isEmpty) return;
+    final abbrevs = Store.getAbbreviations();
+    showDialog(context: context, barrierDismissible: true,
+        builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs));
+  }
+
+  String _todayStr() {
+    final now = DateTime.now();
+    final base = now.hour < 5 ? now.subtract(const Duration(days: 1)) : now;
+    return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
     body: IndexedStack(index: _idx, children: _screens),
@@ -394,6 +423,144 @@ class _MainShellState extends State<MainShell> {
           BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
           BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
         ]))));
+}
+
+// ── 오늘 리마인드 팝업 ─────────────────────────────────────────────────
+class _TodayReminderDialog extends StatefulWidget {
+  final List<ReminderModel> reminders;
+  final List<AbbreviationModel> abbrevs;
+  const _TodayReminderDialog({required this.reminders, required this.abbrevs});
+  @override State<_TodayReminderDialog> createState() => _TodayReminderDialogState();
+}
+class _TodayReminderDialogState extends State<_TodayReminderDialog> {
+  final _memoCtrl = TextEditingController();
+  int _selectedIdx = 0;
+
+  @override void dispose() { _memoCtrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final screenW = MediaQuery.of(context).size.width;
+    final screenH = MediaQuery.of(context).size.height;
+    final isWide = screenW > 600;
+
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      insetPadding: const EdgeInsets.all(16),
+      child: SizedBox(
+        width: isWide ? screenW * 0.85 : screenW - 32,
+        height: screenH * 0.75,
+        child: Column(children: [
+          // 헤더
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
+            decoration: BoxDecoration(
+              color: kBlue,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
+            child: Row(children: [
+              const Icon(Icons.notifications_rounded, color: Colors.white, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text('오늘의 리마인드 (${widget.reminders.length}개)',
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15))),
+              IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 20),
+                  onPressed: () => Navigator.pop(context)),
+            ])),
+          // 본문
+          Expanded(child: isWide
+            ? Row(children: [
+                // 왼쪽: 리마인드 목록
+                SizedBox(width: screenW * 0.38, child: _reminderList()),
+                Container(width: 1, color: const Color(0xFFEEF0F8)),
+                // 오른쪽: 메모장
+                Expanded(child: _memoPanel()),
+              ])
+            : Column(children: [
+                SizedBox(height: screenH * 0.3, child: _reminderList()),
+                Container(height: 1, color: const Color(0xFFEEF0F8)),
+                Expanded(child: _memoPanel()),
+              ])),
+        ])));
+  }
+
+  Widget _reminderList() => ListView.builder(
+    padding: const EdgeInsets.all(12),
+    itemCount: widget.reminders.length,
+    itemBuilder: (ctx, i) {
+      final r = widget.reminders[i];
+      final isSelected = i == _selectedIdx;
+      final isWord = r.type == 'word';
+
+      // 약어면 단어만, 문장이면 약어 색상 표시
+      Widget content;
+      if (isWord) {
+        // 약어: 운지법 없이 단어만
+        content = Text(r.target.replaceAll('*', ' '),
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600,
+                color: isSelected ? kBlue : Colors.black87));
+      } else {
+        // 문장: 약어 색상 표시
+        final parts = analyzeText(r.target, widget.abbrevs);
+        content = Text.rich(TextSpan(
+          children: parts.map((p) {
+            Color color = isSelected ? Colors.black87 : Colors.black87;
+            FontWeight fw = FontWeight.w400;
+            if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
+            if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
+            if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
+            return TextSpan(
+              text: p.resolvedText ?? p.text,
+              style: TextStyle(fontSize: 13, color: color, fontWeight: fw, height: 1.6));
+          }).toList()));
+      }
+
+      return GestureDetector(
+        onTap: () => setState(() => _selectedIdx = i),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: isSelected ? kBlueLight : Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+                color: isSelected ? kBlue : const Color(0xFFEEF0F8),
+                width: isSelected ? 1.5 : 1)),
+          child: Row(children: [
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: isWord ? kBlue.withOpacity(0.1) : kPurple.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6)),
+              child: Text(isWord ? '약어' : '문장',
+                  style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700,
+                      color: isWord ? kBlue : kPurple))),
+            const SizedBox(width: 8),
+            Expanded(child: content),
+          ])));
+    });
+
+  Widget _memoPanel() => Padding(
+    padding: const EdgeInsets.all(12),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('테스트 메모장', style: TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
+      const SizedBox(height: 6),
+      Expanded(child: TextField(
+        controller: _memoCtrl,
+        maxLines: null, expands: true,
+        textAlignVertical: TextAlignVertical.top,
+        decoration: InputDecoration(
+          hintText: '여기에 직접 써보세요...',
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+              borderSide: const BorderSide(color: kBlue)),
+          contentPadding: const EdgeInsets.all(12)))),
+      const SizedBox(height: 8),
+      Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+        TextButton(
+          onPressed: () => setState(() => _memoCtrl.clear()),
+          child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+      ]),
+    ]));
 }
 
 // ── 홈 ────────────────────────────────────────────────────────────────
