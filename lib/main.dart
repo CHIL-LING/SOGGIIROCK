@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'dart:async';
 
 void main() async {
@@ -32,7 +33,6 @@ const List<Color> kGroupColors = [
 String encodeWord(String raw) => raw.replaceAll(' ', '*');
 String decodeWordForSearch(String word) => word.replaceAll('*', '');
 
-// ── 그룹 모델 ─────────────────────────────────────────────────────────
 class GroupModel {
   final String id, name;
   final int colorValue;
@@ -43,7 +43,6 @@ class GroupModel {
     id: m['id'] as String, name: m['name'] as String, colorValue: m['colorValue'] as int);
 }
 
-// ── 약어 모델 ─────────────────────────────────────────────────────────
 class AbbreviationModel {
   final String id, word;
   final List<String> initial, medial, final_;
@@ -114,7 +113,6 @@ class AbbreviationModel {
   }
 }
 
-// ── 기타 모델 ─────────────────────────────────────────────────────────
 class StudyRecordModel {
   final String date, memo;
   final int? studyHours, studyMinutes, speechChars, essayChars, wpm;
@@ -155,7 +153,6 @@ class ReminderModel {
     repeat: m['repeat'] as bool? ?? false, active: m['active'] as bool? ?? true);
 }
 
-// ── 저장소 ────────────────────────────────────────────────────────────
 class Store {
   static Box get _ab => Hive.box('abbreviations');
   static Box get _re => Hive.box('studyRecords');
@@ -208,7 +205,6 @@ class Store {
   }
 }
 
-// ── 타이머 ────────────────────────────────────────────────────────────
 class StudyTimer extends ChangeNotifier {
   static final StudyTimer _instance = StudyTimer._();
   static StudyTimer get instance => _instance;
@@ -248,7 +244,180 @@ class StudyTimer extends ChangeNotifier {
   }
 }
 
-// ── 문장 분석 (유연 약어 코드 제거) ──────────────────────────────────
+// ── TTS 컨트롤러 ─────────────────────────────────────────────────────
+class TtsController extends ChangeNotifier {
+  static final TtsController _instance = TtsController._();
+  static TtsController get instance => _instance;
+  TtsController._() { _init(); }
+
+  final FlutterTts _tts = FlutterTts();
+  bool _playing = false;
+  bool get playing => _playing;
+
+  double speed  = 0.5;
+  double volume = 1.0;
+  double pitch  = 1.0;
+
+  int _wordStart = -1, _wordEnd = -1;
+  int get wordStart => _wordStart;
+  int get wordEnd   => _wordEnd;
+
+  void _init() {
+    _tts.setLanguage('ko-KR');
+    _tts.setSpeechRate(speed);
+    _tts.setVolume(volume);
+    _tts.setPitch(pitch);
+    _tts.setCompletionHandler(() {
+      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    });
+    _tts.setCancelHandler(() {
+      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    });
+    _tts.setProgressHandler((text, start, end, word) {
+      _wordStart = start; _wordEnd = end; notifyListeners();
+    });
+  }
+
+  Future<void> speak(String text) async {
+    await _tts.stop();
+    _playing = true; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    await _tts.setSpeechRate(speed);
+    await _tts.setVolume(volume);
+    await _tts.setPitch(pitch);
+    await _tts.speak(text);
+  }
+
+  Future<void> stop() async {
+    await _tts.stop();
+    _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+  }
+
+  Future<void> applySettings() async {
+    await _tts.setSpeechRate(speed);
+    await _tts.setVolume(volume);
+    await _tts.setPitch(pitch);
+  }
+}
+
+// ── TTS 컨트롤 바 ────────────────────────────────────────────────────
+class TtsControlBar extends StatefulWidget {
+  final String text;
+  const TtsControlBar({super.key, required this.text});
+  @override State<TtsControlBar> createState() => _TtsControlBarState();
+}
+class _TtsControlBarState extends State<TtsControlBar> {
+  bool _showSettings = false;
+  @override void initState() { super.initState(); TtsController.instance.addListener(_rebuild); }
+  @override void dispose() { TtsController.instance.removeListener(_rebuild); super.dispose(); }
+  void _rebuild() { if (mounted) setState(() {}); }
+
+  @override
+  Widget build(BuildContext context) {
+    final tts = TtsController.instance;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: kBlueLight,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: kBlue.withOpacity(0.2))),
+        child: Row(children: [
+          GestureDetector(
+            onTap: () async {
+              tts.playing ? await tts.stop() : await tts.speak(widget.text);
+            },
+            child: Container(
+              width: 40, height: 40,
+              decoration: BoxDecoration(color: kBlue, borderRadius: BorderRadius.circular(10)),
+              child: Icon(
+                tts.playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                color: Colors.white, size: 22))),
+          const SizedBox(width: 10),
+          Expanded(child: Text(
+            tts.playing ? '읽는 중...' : '읽기 시작',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                color: tts.playing ? kBlue : Colors.grey))),
+          GestureDetector(
+            onTap: () => setState(() => _showSettings = !_showSettings),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: _showSettings ? kBlue : Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: kBlue.withOpacity(0.3))),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.tune_rounded, size: 15,
+                    color: _showSettings ? Colors.white : kBlue),
+                const SizedBox(width: 4),
+                Text('설정', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                    color: _showSettings ? Colors.white : kBlue)),
+              ]))),
+        ])),
+      if (_showSettings) ...[
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE0E8FF))),
+          child: Column(children: [
+            _SliderRow(icon: Icons.speed_rounded, label: '속도',
+              value: tts.speed, min: 0.1, max: 1.0, divisions: 9,
+              displayText: _speedLabel(tts.speed),
+              onChanged: (v) async { tts.speed = v; await tts.applySettings(); setState(() {}); }),
+            const SizedBox(height: 10),
+            _SliderRow(icon: Icons.volume_up_rounded, label: '음량',
+              value: tts.volume, min: 0.0, max: 1.0, divisions: 10,
+              displayText: '${(tts.volume * 100).round()}%',
+              onChanged: (v) async { tts.volume = v; await tts.applySettings(); setState(() {}); }),
+            const SizedBox(height: 10),
+            _SliderRow(icon: Icons.music_note_rounded, label: '음높이',
+              value: tts.pitch, min: 0.5, max: 2.0, divisions: 15,
+              displayText: tts.pitch.toStringAsFixed(1),
+              onChanged: (v) async { tts.pitch = v; await tts.applySettings(); setState(() {}); }),
+          ])),
+      ],
+    ]);
+  }
+
+  String _speedLabel(double v) {
+    if (v <= 0.2) return '매우 느림';
+    if (v <= 0.4) return '느림';
+    if (v <= 0.6) return '보통';
+    if (v <= 0.8) return '빠름';
+    return '매우 빠름';
+  }
+}
+
+class _SliderRow extends StatelessWidget {
+  final IconData icon;
+  final String label, displayText;
+  final double value, min, max;
+  final int divisions;
+  final ValueChanged<double> onChanged;
+  const _SliderRow({required this.icon, required this.label, required this.displayText,
+    required this.value, required this.min, required this.max,
+    required this.divisions, required this.onChanged});
+  @override
+  Widget build(BuildContext context) => Row(children: [
+    Icon(icon, size: 16, color: kBlue),
+    const SizedBox(width: 6),
+    SizedBox(width: 40, child: Text(label,
+        style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600))),
+    Expanded(child: SliderTheme(
+      data: SliderTheme.of(context).copyWith(
+        trackHeight: 3,
+        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+        overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+        activeTrackColor: kBlue, inactiveTrackColor: kBlueLight,
+        thumbColor: kBlue, overlayColor: kBlue.withOpacity(0.12)),
+      child: Slider(value: value, min: min, max: max, divisions: divisions, onChanged: onChanged))),
+    SizedBox(width: 52, child: Text(displayText,
+        style: const TextStyle(fontSize: 11, color: kBlueDark, fontWeight: FontWeight.w700),
+        textAlign: TextAlign.right)),
+  ]);
+}
+
+// ── 문장 분석 ─────────────────────────────────────────────────────────
 class _Span {
   final String text, type;
   final AbbreviationModel? abbr;
@@ -282,7 +451,6 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   }).toList();
 }
 
-// ── 검색 정렬 ─────────────────────────────────────────────────────────
 int _similarity(String word, String query) {
   if (word == query) return 100;
   if (word.startsWith(query)) return 80;
@@ -306,7 +474,6 @@ List<AbbreviationModel> sortedSearchResults(List<AbbreviationModel> all, String 
   return filtered;
 }
 
-// ── 앱 ────────────────────────────────────────────────────────────────
 class SoggiApp extends StatelessWidget {
   const SoggiApp({super.key});
   @override
@@ -344,7 +511,6 @@ class _SplashScreenState extends State<SplashScreen> {
     ])));
 }
 
-// ── 메인 쉘 ──────────────────────────────────────────────────────────
 class MainShell extends StatefulWidget {
   const MainShell({super.key});
   @override State<MainShell> createState() => _MainShellState();
@@ -402,7 +568,6 @@ class _MainShellState extends State<MainShell> {
         ]))));
 }
 
-// ── 오늘 리마인드 팝업 ────────────────────────────────────────────────
 class _TodayReminderDialog extends StatefulWidget {
   final List<ReminderModel> reminders;
   final List<AbbreviationModel> abbrevs;
@@ -501,7 +666,6 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
     ]));
 }
 
-// ── 전역 상태 ─────────────────────────────────────────────────────────
 final _analyzerCtrl     = TextEditingController();
 bool  _analyzerAnalyzed = false;
 final _searchScrollCtrl = ScrollController();
@@ -529,7 +693,7 @@ extension ListExt<T> on List<T> {
   T? get firstOrNull => isEmpty ? null : first;
   T? elementAtOrNull(int index) => (index >= 0 && index < length) ? this[index] : null;
 }
-// ── 홈 ────────────────────────────────────────────────────────────────
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override State<HomeScreen> createState() => _HomeScreenState();
@@ -812,7 +976,6 @@ class _Div extends StatelessWidget {
   @override Widget build(BuildContext context) => Container(width: 1, height: 28, color: const Color(0xFFC8D8F8));
 }
 
-// ── 그래프 ────────────────────────────────────────────────────────────
 class GraphScreen extends StatefulWidget {
   const GraphScreen({super.key});
   @override State<GraphScreen> createState() => _GraphScreenState();
@@ -888,7 +1051,7 @@ class _PB extends StatelessWidget {
     child:Text(label,style:TextStyle(color:isSel?Colors.white:kBlue,fontWeight:FontWeight.w700,fontSize:12))));}
 }
 
-// ── 약어확인 탭 ───────────────────────────────────────────────────────
+// ── 약어확인 탭 (TTS 포함) ───────────────────────────────────────────
 class SentenceAnalyzerScreen extends StatefulWidget {
   const SentenceAnalyzerScreen({super.key});
   @override State<SentenceAnalyzerScreen> createState() => _SentenceAnalyzerScreenState();
@@ -921,7 +1084,13 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
     setState(() { _gridSelected.clear(); _gridSelectMode = false; });
   }
 
-  @override void dispose() { _focusNode.dispose(); _tooltipOverlay?.remove(); super.dispose(); }
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    _tooltipOverlay?.remove();
+    TtsController.instance.stop();
+    super.dispose();
+  }
 
   void _showAbbrTooltip(BuildContext context, AbbreviationModel abbr, Offset position) {
     _tooltipOverlay?.remove(); _tooltipOverlay = null;
@@ -979,7 +1148,11 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-          onPressed: () { _analyzerCtrl.clear(); _analyzerAnalyzed = false; Navigator.pop(ctx); setState(() {}); },
+          onPressed: () {
+            _analyzerCtrl.clear(); _analyzerAnalyzed = false;
+            TtsController.instance.stop();
+            Navigator.pop(ctx); setState(() {});
+          },
           child: const Text('지우기')),
       ]));
   }
@@ -994,6 +1167,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
         final found = _analyzerAnalyzed
             ? parts.where((p) => p.type != 'normal').map((p) => p.abbr!).toSet().toList()
             : <AbbreviationModel>[];
+        final plainText = parts.map((p) => p.text).join();
 
         return GestureDetector(
           onTap: () { _closeTooltip(); FocusScope.of(context).requestFocus(_focusNode); },
@@ -1045,11 +1219,17 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                     Container(width: double.infinity, padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
                           borderRadius: BorderRadius.circular(12), border: Border.all(color: kBlueLight)),
-                      child: _AnalysisTextView(parts: parts, selectedAbbr: _selectedAbbr,
+                      child: TtsAnalysisTextView(
+                        parts: parts,
+                        selectedAbbr: _selectedAbbr,
                         onAbbrTap: (abbr, pos) {
                           if (_selectedAbbr?.id == abbr.id) _closeTooltip();
                           else _showAbbrTooltip(context, abbr, pos);
-                        })),
+                        },
+                      )),
+                    const SizedBox(height: 10),
+                    // ── TTS 컨트롤 바 ──
+                    TtsControlBar(text: plainText),
                     if (found.isNotEmpty) ...[
                       const SizedBox(height: 14),
                       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
@@ -1151,37 +1331,84 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   }
 }
 
-class _AnalysisTextView extends StatelessWidget {
+// ── TTS 하이라이트 분석 텍스트 뷰 ────────────────────────────────────
+class TtsAnalysisTextView extends StatefulWidget {
   final List<_Span> parts;
   final AbbreviationModel? selectedAbbr;
   final void Function(AbbreviationModel, Offset) onAbbrTap;
-  const _AnalysisTextView({required this.parts, required this.selectedAbbr, required this.onAbbrTap});
+  const TtsAnalysisTextView({super.key, required this.parts,
+    required this.selectedAbbr, required this.onAbbrTap});
+  @override State<TtsAnalysisTextView> createState() => _TtsAnalysisTextViewState();
+}
+class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
+  @override void initState() { super.initState(); TtsController.instance.addListener(_rebuild); }
+  @override void dispose() { TtsController.instance.removeListener(_rebuild); super.dispose(); }
+  void _rebuild() { if (mounted) setState(() {}); }
+
   @override
   Widget build(BuildContext context) {
-    final hasAbbr = parts.any((p) => p.abbr != null);
-    if (!hasAbbr) {
-      return SelectableText.rich(TextSpan(children: parts.map((p) => TextSpan(
-          text: p.text, style: const TextStyle(fontSize: 16, color: Colors.black87, height: 1.8))).toList()));
+    final tts = TtsController.instance;
+    final ws = tts.wordStart;
+    final we = tts.wordEnd;
+    final hasAbbr = widget.parts.any((p) => p.abbr != null);
+
+    if (!hasAbbr && !tts.playing) {
+      return SelectableText.rich(TextSpan(children: widget.parts.map((p) =>
+          TextSpan(text: p.text,
+              style: const TextStyle(fontSize: 16, color: Colors.black87, height: 1.8))).toList()));
     }
-    return Text.rich(TextSpan(children: parts.map((p) {
+
+    int offset = 0;
+    final children = <InlineSpan>[];
+
+    for (final p in widget.parts) {
       Color color = Colors.black87; FontWeight fw = FontWeight.w400;
       if (p.type == 'abbr')       { color = kBlue;    fw = FontWeight.w700; }
       if (p.type == 'composite')  { color = kBlueSky; fw = FontWeight.w700; }
       if (p.type == 'concurrent') { color = kPurple;  fw = FontWeight.w700; }
-      final displayText = p.text + (p.abbr?.isFavorite == true ? '⭐' : '');
-      final isSelected = selectedAbbr?.id == p.abbr?.id && p.abbr != null;
+
+      final spanStart = offset;
+      final spanEnd   = offset + p.text.length;
+      final isHighlighted = tts.playing && ws >= 0 && spanStart < we && spanEnd > ws;
+      final displayText   = p.text + (p.abbr?.isFavorite == true ? '⭐' : '');
+      final isSelected    = widget.selectedAbbr?.id == p.abbr?.id && p.abbr != null;
+
       if (p.abbr != null) {
-        return WidgetSpan(
+        children.add(WidgetSpan(
           alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
           child: GestureDetector(
-            onTapUp: (details) => onAbbrTap(p.abbr!, details.globalPosition),
+            onTapUp: (d) => widget.onAbbrTap(p.abbr!, d.globalPosition),
             child: Container(
-              decoration: isSelected ? BoxDecoration(color: color.withOpacity(0.12), borderRadius: BorderRadius.circular(3)) : null,
-              child: Text(displayText, style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8,
-                  decoration: isSelected ? TextDecoration.underline : null, decorationColor: color)))));
+              decoration: BoxDecoration(
+                color: isHighlighted ? kBlue.withOpacity(0.18)
+                    : isSelected ? color.withOpacity(0.12) : null,
+                borderRadius: BorderRadius.circular(3)),
+              child: Text(displayText,
+                  style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8,
+                      decoration: isSelected ? TextDecoration.underline : null,
+                      decorationColor: color))))));
+      } else {
+        if (isHighlighted) {
+          final lws = (ws - spanStart).clamp(0, p.text.length);
+          final lwe = (we - spanStart).clamp(0, p.text.length);
+          if (lws > 0) children.add(TextSpan(text: p.text.substring(0, lws),
+              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+          children.add(WidgetSpan(
+            alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
+            child: Container(
+              decoration: BoxDecoration(color: kBlue.withOpacity(0.18), borderRadius: BorderRadius.circular(3)),
+              child: Text(p.text.substring(lws, lwe),
+                  style: TextStyle(fontSize: 16, color: color, fontWeight: FontWeight.w700, height: 1.8)))));
+          if (lwe < p.text.length) children.add(TextSpan(text: p.text.substring(lwe),
+              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+        } else {
+          children.add(TextSpan(text: displayText,
+              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+        }
       }
-      return TextSpan(text: displayText, style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8));
-    }).toList()));
+      offset = spanEnd;
+    }
+    return Text.rich(TextSpan(children: children));
   }
 }
 
@@ -1194,7 +1421,7 @@ class _Leg extends StatelessWidget {
     Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
   ]);
 }
-// ── 약어검색 탭 ───────────────────────────────────────────────────────
+
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
   @override State<SearchScreen> createState() => _SearchScreenState();
@@ -1483,7 +1710,6 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 }
 
-// ── 선택된 약어 모아보기 화면 ────────────────────────────────────────
 class _SelectedAbbrView extends StatefulWidget {
   final List<AbbreviationModel> items;
   const _SelectedAbbrView({required this.items});
@@ -1495,7 +1721,6 @@ class _SelectedAbbrViewState extends State<_SelectedAbbrView> {
     return ValueListenableBuilder(valueListenable: Hive.box('abbreviations').listenable(),
       builder: (context, box, _) {
         final groups = Store.getGroups();
-        // 최신 데이터로 갱신 (id 기준)
         final allNow = Store.getAbbreviations();
         final items = widget.items
             .map((old) => allNow.firstWhere((a) => a.id == old.id, orElse: () => old))
@@ -1530,7 +1755,6 @@ class _SelectedAbbrViewState extends State<_SelectedAbbrView> {
       });
   }
 }
-
 
 void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
   final List<Map<String, TextEditingController>> rows = [];
@@ -1588,7 +1812,6 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         }
       }
 
-      // 전체 행에 첫 번째 행의 분류/그룹을 적용
       void applyToAll() => setS(() {
         for (int i = 1; i < rows.length; i++) {
           rowFlags[i] = Map.from(rowFlags[0]);
@@ -1698,7 +1921,6 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
     }));
 }
 
-// ── 그룹 관리 화면 ────────────────────────────────────────────────────
 class GroupManageScreen extends StatefulWidget {
   const GroupManageScreen({super.key});
   @override State<GroupManageScreen> createState() => _GroupManageScreenState();
@@ -1796,7 +2018,6 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
   }
 }
 
-// ── 약어 타일 공통 ────────────────────────────────────────────────────
 class _AbbrContent extends StatelessWidget {
   final AbbreviationModel abbr;
   final List<GroupModel> groups;
@@ -1860,7 +2081,6 @@ class _AbbrListTileState extends State<_AbbrListTile> {
     ]));
 }
 
-// ── 분류 토글 버튼 ────────────────────────────────────────────────────
 class _TypeToggleRow extends StatelessWidget {
   final bool isComposite, isConcurrent, isAttached, isFavorite;
   final ValueChanged<bool> onCompositeChanged, onConcurrentChanged, onAttachedChanged, onFavoriteChanged;
@@ -1895,7 +2115,6 @@ class _ToggleChip extends StatelessWidget {
       ])));
 }
 
-// ── 문장등록 탭 ───────────────────────────────────────────────────────
 class SentenceRegisterScreen extends StatefulWidget {
   const SentenceRegisterScreen({super.key});
   @override State<SentenceRegisterScreen> createState() => _SentenceRegisterScreenState();
@@ -2100,7 +2319,6 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
   }
 }
 
-// ── 리마인드 탭 ───────────────────────────────────────────────────────
 class RemindersScreen extends StatefulWidget {
   const RemindersScreen({super.key});
   @override State<RemindersScreen> createState() => _RemindersScreenState();
@@ -2130,7 +2348,6 @@ class _RemindersScreenState extends State<RemindersScreen> {
     setState(() { _selected.clear(); _selectMode = false; });
   }
 
-  // 선택된 리마인드(1개) 수정 - 대상 텍스트, 날짜/간격, 반복
   void _editSelected(BuildContext context, List<ReminderModel> all) {
     if (_selected.length != 1) return;
     final r = all.firstWhere((r) => _selected.contains(r.id));
@@ -2388,7 +2605,6 @@ class _RemindersScreenState extends State<RemindersScreen> {
   }
 }
 
-// ── 공통 함수 ─────────────────────────────────────────────────────────
 void _showReminderDialog(BuildContext context, String target, String type) {
   final existing = Store.findReminder(target);
   int interval = existing?.intervalDays ?? 1;
