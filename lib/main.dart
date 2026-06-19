@@ -257,37 +257,72 @@ class TtsController extends ChangeNotifier {
   double speed  = 0.5;
   double volume = 1.0;
   double pitch  = 1.0;
+  double pauseMs = 250;
 
   int _wordStart = -1, _wordEnd = -1;
   int get wordStart => _wordStart;
   int get wordEnd   => _wordEnd;
+
+  int _playToken = 0;
 
   void _init() {
     _tts.setLanguage('ko-KR');
     _tts.setSpeechRate(speed);
     _tts.setVolume(volume);
     _tts.setPitch(pitch);
-    _tts.setCompletionHandler(() {
-      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
-    });
-    _tts.setCancelHandler(() {
-      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
-    });
-    _tts.setProgressHandler((text, start, end, word) {
-      _wordStart = start; _wordEnd = end; notifyListeners();
-    });
+  }
+
+  List<MapEntry<int, String>> _splitWithOffsets(String text) {
+    final result = <MapEntry<int, String>>[];
+    final regex = RegExp(r'\S+');
+    for (final m in regex.allMatches(text)) {
+      result.add(MapEntry(m.start, m.group(0)!));
+    }
+    return result;
   }
 
   Future<void> speak(String text) async {
-    await _tts.stop();
-    _playing = true; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    await stop();
+    final myToken = ++_playToken;
+    _playing = true; notifyListeners();
+
     await _tts.setSpeechRate(speed);
     await _tts.setVolume(volume);
     await _tts.setPitch(pitch);
-    await _tts.speak(text);
+
+    final words = _splitWithOffsets(text);
+
+    for (int i = 0; i < words.length; i++) {
+      if (myToken != _playToken) return;
+
+      final start = words[i].key;
+      final word = words[i].value;
+      final end = start + word.length;
+
+      _wordStart = start; _wordEnd = end; notifyListeners();
+
+      final completer = Completer<void>();
+      _tts.setCompletionHandler(() { if (!completer.isCompleted) completer.complete(); });
+      _tts.setCancelHandler(() { if (!completer.isCompleted) completer.complete(); });
+      _tts.setErrorHandler((_) { if (!completer.isCompleted) completer.complete(); });
+
+      await _tts.speak(word);
+      await completer.future;
+
+      if (myToken != _playToken) return;
+
+      if (i < words.length - 1 && pauseMs > 0) {
+        await Future.delayed(Duration(milliseconds: pauseMs.round()));
+      }
+    }
+
+    if (myToken == _playToken) {
+      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    }
   }
 
   Future<void> stop() async {
+    _playToken++;
     await _tts.stop();
     _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
   }
@@ -374,7 +409,11 @@ class _TtsControlBarState extends State<TtsControlBar> {
               value: tts.pitch, min: 0.5, max: 2.0, divisions: 15,
               displayText: tts.pitch.toStringAsFixed(1),
               onChanged: (v) async { tts.pitch = v; await tts.applySettings(); setState(() {}); }),
-          ])),
+          const SizedBox(height: 10),
+            _SliderRow(icon: Icons.space_bar_rounded, label: '포즈',
+              value: tts.pauseMs, min: 0, max: 1000, divisions: 20,
+              displayText: '${tts.pauseMs.round()}ms',
+              onChanged: (v) { tts.pauseMs = v; setState(() {}); }),])),
       ],
     ]);
   }
