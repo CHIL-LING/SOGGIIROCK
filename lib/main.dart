@@ -264,6 +264,28 @@ class TtsController extends ChangeNotifier {
   int get wordEnd   => _wordEnd;
 
   int _playToken = 0;
+  List<MapEntry<int, String>> _words = [];
+  int _currentIndex = 0;
+  String _fullText = '';
+
+  // 진행률 (0.0 ~ 1.0)
+  double get progress => _words.isEmpty ? 0 : _currentIndex / _words.length;
+  int get currentWordIndex => _currentIndex;
+  int get totalWords => _words.length;
+
+  // 경과 시간 / CPM
+  Stopwatch _stopwatch = Stopwatch();
+  Duration get elapsed => _stopwatch.elapsed;
+  int get charsReadSoFar {
+    if (_words.isEmpty || _currentIndex == 0) return 0;
+    final idx = (_currentIndex - 1).clamp(0, _words.length - 1);
+    return _words[idx].key + _words[idx].value.length;
+  }
+  double get cpm {
+    final mins = _stopwatch.elapsed.inMilliseconds / 60000.0;
+    if (mins <= 0) return 0;
+    return charsReadSoFar / mins;
+  }
 
   void _init() {
     _tts.setLanguage('ko-KR');
@@ -281,24 +303,32 @@ class TtsController extends ChangeNotifier {
     return result;
   }
 
-  Future<void> speak(String text) async {
+  // text: 전체 문장, startIndex: 시작할 단어 인덱스 (기본 0 = 처음부터)
+  Future<void> speak(String text, {int startIndex = 0}) async {
     await stop();
     final myToken = ++_playToken;
-    _playing = true; notifyListeners();
+    _fullText = text;
+    _words = _splitWithOffsets(text);
+    if (_words.isEmpty) return;
+
+    _currentIndex = startIndex.clamp(0, _words.length - 1);
+    _playing = true;
+    _stopwatch
+      ..reset()
+      ..start();
+    notifyListeners();
 
     await _tts.setSpeechRate(speed);
     await _tts.setVolume(volume);
     await _tts.setPitch(pitch);
 
-    final words = _splitWithOffsets(text);
-
-    for (int i = 0; i < words.length; i++) {
+    for (int i = _currentIndex; i < _words.length; i++) {
       if (myToken != _playToken) return;
 
-      final start = words[i].key;
-      final word = words[i].value;
+      _currentIndex = i;
+      final start = _words[i].key;
+      final word = _words[i].value;
       final end = start + word.length;
-
       _wordStart = start; _wordEnd = end; notifyListeners();
 
       final completer = Completer<void>();
@@ -311,20 +341,73 @@ class TtsController extends ChangeNotifier {
 
       if (myToken != _playToken) return;
 
-      if (i < words.length - 1 && pauseMs > 0) {
+      if (i < _words.length - 1 && pauseMs > 0) {
         await Future.delayed(Duration(milliseconds: pauseMs.round()));
       }
     }
 
     if (myToken == _playToken) {
-      _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+      _currentIndex = _words.length;
+      _playing = false; _wordStart = -1; _wordEnd = -1;
+      _stopwatch.stop();
+      notifyListeners();
     }
+  }
+
+  // 특정 글자 오프셋이 속한 단어부터 재생 (텍스트 탭 시 사용)
+  Future<void> seekAndPlay(int charOffset) async {
+    if (_words.isEmpty) {
+      // 아직 한 번도 재생 안 한 상태면 fullText 기준으로 단어 분리만 먼저 함
+      _words = _splitWithOffsets(_fullText);
+    }
+    int idx = _words.indexWhere((w) => charOffset >= w.key && charOffset < w.key + w.value.length);
+    if (idx == -1) {
+      idx = _words.indexWhere((w) => w.key >= charOffset);
+      if (idx == -1) idx = _words.isEmpty ? 0 : _words.length - 1;
+    }
+    await speak(_fullText, startIndex: idx);
+  }
+
+  // 진행률(0.0~1.0)로 이동 후 재생 (진행바 드래그용)
+  Future<void> seekToProgress(double ratio) async {
+    if (_fullText.isEmpty) return;
+    final words = _words.isEmpty ? _splitWithOffsets(_fullText) : _words;
+    if (words.isEmpty) return;
+    final idx = (ratio * words.length).floor().clamp(0, words.length - 1);
+    await speak(_fullText, startIndex: idx);
   }
 
   Future<void> stop() async {
     _playToken++;
     await _tts.stop();
-    _playing = false; _wordStart = -1; _wordEnd = -1; notifyListeners();
+    _playing = false; _wordStart = -1; _wordEnd = -1;
+    _stopwatch.stop();
+    notifyListeners();
+  }
+
+  // 정지하되 진행 위치는 유지 (이어듣기용 일시정지)
+  Future<void> pause() async {
+    _playToken++;
+    await _tts.stop();
+    _playing = false;
+    _stopwatch.stop();
+    notifyListeners();
+  }
+
+  Future<void> resume() async {
+    if (_fullText.isEmpty) return;
+    await speak(_fullText, startIndex: _currentIndex);
+  }
+
+  void setText(String text) {
+    if (_fullText != text) {
+      _fullText = text;
+      _words = _splitWithOffsets(text);
+      _currentIndex = 0;
+      _wordStart = -1; _wordEnd = -1;
+      _stopwatch.reset();
+      notifyListeners();
+    }
   }
 
   Future<void> applySettings() async {
@@ -333,7 +416,6 @@ class TtsController extends ChangeNotifier {
     await _tts.setPitch(pitch);
   }
 }
-
 // ── TTS 컨트롤 바 ────────────────────────────────────────────────────
 class TtsControlBar extends StatefulWidget {
   final String text;
@@ -342,9 +424,40 @@ class TtsControlBar extends StatefulWidget {
 }
 class _TtsControlBarState extends State<TtsControlBar> {
   bool _showSettings = false;
-  @override void initState() { super.initState(); TtsController.instance.addListener(_rebuild); }
-  @override void dispose() { TtsController.instance.removeListener(_rebuild); super.dispose(); }
+  Timer? _uiTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    TtsController.instance.setText(widget.text);
+    TtsController.instance.addListener(_rebuild);
+    _uiTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted && TtsController.instance.playing) setState(() {});
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant TtsControlBar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) {
+      TtsController.instance.setText(widget.text);
+    }
+  }
+
+  @override
+  void dispose() {
+    TtsController.instance.removeListener(_rebuild);
+    _uiTimer?.cancel();
+    super.dispose();
+  }
+
   void _rebuild() { if (mounted) setState(() {}); }
+
+  String _fmtTime(Duration d) {
+    final m = d.inMinutes.toString().padLeft(2, '0');
+    final s = (d.inSeconds % 60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -356,37 +469,107 @@ class _TtsControlBarState extends State<TtsControlBar> {
           color: kBlueLight,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(color: kBlue.withOpacity(0.2))),
-        child: Row(children: [
-          GestureDetector(
-            onTap: () async {
-              tts.playing ? await tts.stop() : await tts.speak(widget.text);
-            },
-            child: Container(
-              width: 40, height: 40,
-              decoration: BoxDecoration(color: kBlue, borderRadius: BorderRadius.circular(10)),
-              child: Icon(
-                tts.playing ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                color: Colors.white, size: 22))),
-          const SizedBox(width: 10),
-          Expanded(child: Text(
-            tts.playing ? '읽는 중...' : '읽기 시작',
-            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
-                color: tts.playing ? kBlue : Colors.grey))),
-          GestureDetector(
-            onTap: () => setState(() => _showSettings = !_showSettings),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              decoration: BoxDecoration(
-                color: _showSettings ? kBlue : Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: kBlue.withOpacity(0.3))),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.tune_rounded, size: 15,
-                    color: _showSettings ? Colors.white : kBlue),
-                const SizedBox(width: 4),
-                Text('설정', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                    color: _showSettings ? Colors.white : kBlue)),
-              ]))),
+        child: Column(children: [
+          Row(children: [
+            GestureDetector(
+              onTap: () async {
+                if (tts.playing) {
+                  await tts.pause();
+                } else if (tts.currentWordIndex > 0 && tts.currentWordIndex < tts.totalWords) {
+                  await tts.resume();
+                } else {
+                  await tts.speak(widget.text);
+                }
+              },
+              child: Container(
+                width: 40, height: 40,
+                decoration: BoxDecoration(color: kBlue, borderRadius: BorderRadius.circular(10)),
+                child: Icon(
+                  tts.playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                  color: Colors.white, size: 22)),
+            ),
+            const SizedBox(width: 8),
+            GestureDetector(
+              onTap: () async {
+                if (tts.totalWords > 0) await tts.speak(widget.text, startIndex: 0);
+              },
+              child: Container(
+                width: 36, height: 36,
+                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: kBlue.withOpacity(0.3))),
+                child: const Icon(Icons.replay_rounded, color: kBlue, size: 18)),
+            ),
+            const SizedBox(width: 10),
+            Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(
+                tts.playing ? '읽는 중 · 단어를 누르면 그 지점부터 재생' : '단어를 탭하면 거기서부터 재생돼요',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    color: tts.playing ? kBlue : Colors.grey),
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 2),
+              Row(children: [
+                Icon(Icons.timer_outlined, size: 12, color: kBlueDark),
+                const SizedBox(width: 3),
+                Text(_fmtTime(tts.elapsed),
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kBlueDark)),
+                const SizedBox(width: 10),
+                const Icon(Icons.speed_rounded, size: 12, color: kBlueDark),
+                const SizedBox(width: 3),
+                Text('${tts.cpm.round()} 자/분',
+                    style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: kBlueDark)),
+              ]),
+            ])),
+            GestureDetector(
+              onTap: () => setState(() => _showSettings = !_showSettings),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _showSettings ? kBlue : Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: kBlue.withOpacity(0.3))),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.tune_rounded, size: 15,
+                      color: _showSettings ? Colors.white : kBlue),
+                  const SizedBox(width: 4),
+                  Text('설정', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                      color: _showSettings ? Colors.white : kBlue)),
+                ])),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          LayoutBuilder(builder: (context, constraints) {
+            final barWidth = constraints.maxWidth;
+            return GestureDetector(
+              onTapDown: (d) async {
+                final ratio = (d.localPosition.dx / barWidth).clamp(0.0, 1.0);
+                await tts.seekToProgress(ratio);
+              },
+              onHorizontalDragUpdate: (d) async {
+                final ratio = (d.localPosition.dx / barWidth).clamp(0.0, 1.0);
+                await tts.seekToProgress(ratio);
+              },
+              child: Container(
+                height: 18,
+                alignment: Alignment.center,
+                child: Stack(children: [
+                  Container(height: 6,
+                    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(3))),
+                  FractionallySizedBox(
+                    widthFactor: tts.progress.clamp(0.0, 1.0),
+                    child: Container(height: 6,
+                      decoration: BoxDecoration(color: kBlue, borderRadius: BorderRadius.circular(3))),
+                  ),
+                ]),
+              ),
+            );
+          }),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('${tts.currentWordIndex}/${tts.totalWords} 단어',
+                style: const TextStyle(fontSize: 10, color: Colors.grey)),
+            Text('${(tts.progress * 100).round()}%',
+                style: const TextStyle(fontSize: 10, color: Colors.grey)),
+          ]),
         ])),
       if (_showSettings) ...[
         const SizedBox(height: 6),
@@ -409,11 +592,12 @@ class _TtsControlBarState extends State<TtsControlBar> {
               value: tts.pitch, min: 0.5, max: 2.0, divisions: 15,
               displayText: tts.pitch.toStringAsFixed(1),
               onChanged: (v) async { tts.pitch = v; await tts.applySettings(); setState(() {}); }),
-          const SizedBox(height: 10),
+            const SizedBox(height: 10),
             _SliderRow(icon: Icons.space_bar_rounded, label: '포즈',
               value: tts.pauseMs, min: 0, max: 1000, divisions: 20,
               displayText: '${tts.pauseMs.round()}ms',
-              onChanged: (v) { tts.pauseMs = v; setState(() {}); }),])),
+              onChanged: (v) { tts.pauseMs = v; setState(() {}); }),
+          ])),
       ],
     ]);
   }
@@ -426,7 +610,6 @@ class _TtsControlBarState extends State<TtsControlBar> {
     return '매우 빠름';
   }
 }
-
 class _SliderRow extends StatelessWidget {
   final IconData icon;
   final String label, displayText;
@@ -1370,7 +1553,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   }
 }
 
-// ── TTS 하이라이트 분석 텍스트 뷰 ────────────────────────────────────
+// ── TTS 하이라이트 분석 텍스트 뷰 (탭하면 그 위치부터 재생) ──────────
 class TtsAnalysisTextView extends StatefulWidget {
   final List<_Span> parts;
   final AbbreviationModel? selectedAbbr;
@@ -1390,12 +1573,6 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
     final ws = tts.wordStart;
     final we = tts.wordEnd;
     final hasAbbr = widget.parts.any((p) => p.abbr != null);
-
-    if (!hasAbbr && !tts.playing) {
-      return SelectableText.rich(TextSpan(children: widget.parts.map((p) =>
-          TextSpan(text: p.text,
-              style: const TextStyle(fontSize: 16, color: Colors.black87, height: 1.8))).toList()));
-    }
 
     int offset = 0;
     final children = <InlineSpan>[];
@@ -1417,6 +1594,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
           alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
           child: GestureDetector(
             onTapUp: (d) => widget.onAbbrTap(p.abbr!, d.globalPosition),
+            onLongPress: () => TtsController.instance.seekAndPlay(spanStart),
             child: Container(
               decoration: BoxDecoration(
                 color: isHighlighted ? kBlue.withOpacity(0.18)
@@ -1427,22 +1605,32 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
                       decoration: isSelected ? TextDecoration.underline : null,
                       decorationColor: color))))));
       } else {
-        if (isHighlighted) {
-          final lws = (ws - spanStart).clamp(0, p.text.length);
-          final lwe = (we - spanStart).clamp(0, p.text.length);
-          if (lws > 0) children.add(TextSpan(text: p.text.substring(0, lws),
-              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
-          children.add(WidgetSpan(
-            alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
-            child: Container(
-              decoration: BoxDecoration(color: kBlue.withOpacity(0.18), borderRadius: BorderRadius.circular(3)),
-              child: Text(p.text.substring(lws, lwe),
-                  style: TextStyle(fontSize: 16, color: color, fontWeight: FontWeight.w700, height: 1.8)))));
-          if (lwe < p.text.length) children.add(TextSpan(text: p.text.substring(lwe),
-              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
-        } else {
-          children.add(TextSpan(text: displayText,
-              style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+        final wordRegex = RegExp(r'\S+|\s+');
+        for (final m in wordRegex.allMatches(p.text)) {
+          final piece = m.group(0)!;
+          final pieceStart = spanStart + m.start;
+          final pieceEnd = pieceStart + piece.length;
+          final pieceHighlighted = tts.playing && ws >= 0 && pieceStart < we && pieceEnd > ws;
+          final isSpace = piece.trim().isEmpty;
+
+          if (isSpace) {
+            children.add(TextSpan(text: piece,
+                style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+          } else {
+            children.add(WidgetSpan(
+              alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
+              child: GestureDetector(
+                onTap: () => TtsController.instance.seekAndPlay(pieceStart),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: pieceHighlighted ? kBlue.withOpacity(0.18) : null,
+                    borderRadius: BorderRadius.circular(3)),
+                  child: Text(piece,
+                      style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)),
+                ),
+              ),
+            ));
+          }
         }
       }
       offset = spanEnd;
