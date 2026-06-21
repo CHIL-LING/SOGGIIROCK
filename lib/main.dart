@@ -2009,7 +2009,31 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
       final groups = Store.getGroups();
       List<String> pf(String s) => s.split(RegExp(r'[+\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
 
-      Future<void> saveAll() async {
+     Future<void> saveAll() async {
+        // 중복 단어 체크
+        final dupWords = <String>[];
+        for (int i = 0; i < rows.length; i++) {
+          final raw = rows[i]['word']!.text.trim();
+          if (raw.isEmpty) continue;
+          final word = encodeWord(raw);
+          final excludeId = (existing != null && i == 0) ? existing.id : null;
+          if (Store.existsWord(word, excludeId: excludeId)) {
+            dupWords.add(raw);
+          }
+        }
+
+        if (dupWords.isNotEmpty) {
+          final proceedAnyway = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Text('이미 등록된 단어', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            content: Text('다음 단어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                  onPressed: () => Navigator.pop(c, true), child: const Text('그래도 저장'))]));
+          if (proceedAnyway != true) return;
+        }
+
         final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Text(existing != null ? '수정 확인' : '저장 확인',
