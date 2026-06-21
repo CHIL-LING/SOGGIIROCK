@@ -750,6 +750,12 @@ class _MainShellState extends State<MainShell> {
   }
   void _checkTodayReminders() {
     final today = _todayStr();
+
+    // "오늘 다시 보지 않음"을 눌렀는지 확인
+    final dismissedBox = Hive.box('reminders');
+    final dismissedKey = '_dismissed_$today';
+    if (dismissedBox.get(dismissedKey) == true) return;
+
     final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
     if (reminders.isEmpty) return;
     final abbrevs = Store.getAbbreviations();
@@ -762,7 +768,7 @@ class _MainShellState extends State<MainShell> {
       }
     }
     showDialog(context: context, barrierDismissible: true,
-        builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs));
+        builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs, todayKey: today));
   }
   String _todayStr() {
     final now = DateTime.now();
@@ -793,7 +799,8 @@ class _MainShellState extends State<MainShell> {
 class _TodayReminderDialog extends StatefulWidget {
   final List<ReminderModel> reminders;
   final List<AbbreviationModel> abbrevs;
-  const _TodayReminderDialog({required this.reminders, required this.abbrevs});
+  final String todayKey;
+  const _TodayReminderDialog({required this.reminders, required this.abbrevs, required this.todayKey});
   @override State<_TodayReminderDialog> createState() => _TodayReminderDialogState();
 }
 class _TodayReminderDialogState extends State<_TodayReminderDialog> {
@@ -812,13 +819,25 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
         child: Column(children: [
           Container(padding: const EdgeInsets.fromLTRB(20, 16, 12, 16),
             decoration: BoxDecoration(color: kBlue, borderRadius: const BorderRadius.vertical(top: Radius.circular(20))),
-            child: Row(children: [
-              const Icon(Icons.notifications_rounded, color: Colors.white, size: 20),
-              const SizedBox(width: 8),
-              Expanded(child: Text('오늘의 리마인드 (${widget.reminders.length}개)',
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15))),
-              IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 20),
-                  onPressed: () => Navigator.pop(context)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              Row(children: [
+                const Icon(Icons.notifications_rounded, color: Colors.white, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text('오늘의 리마인드 (${widget.reminders.length}개)',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 15))),
+                IconButton(icon: const Icon(Icons.close, color: Colors.white, size: 20),
+                    onPressed: () => Navigator.pop(context)),
+              ]),
+              TextButton.icon(
+                onPressed: () {
+                  Hive.box('reminders').put('_dismissed_${widget.todayKey}', true);
+                  Navigator.pop(context);
+                },
+                icon: const Icon(Icons.visibility_off_rounded, size: 14, color: Colors.white70),
+                label: const Text('오늘 다시 보지 않음',
+                    style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.w600)),
+                style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4)),
+              ),
             ])),
           Expanded(child: isWide
             ? Row(children: [
