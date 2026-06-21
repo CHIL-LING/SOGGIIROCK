@@ -409,7 +409,31 @@ class TtsController extends ChangeNotifier {
       notifyListeners();
     }
   }
+// 목표 CPM(공백 제외 글자/분)과 포즈 시간(ms)에 맞춰 속도를 자동 추정
+  // 기준점: speechRate 0.5일 때 평균적으로 글자당 약 0.18초 소요된다고 가정 (경험적 근사치)
+  void autoTuneSpeed({required double targetCpm, double? pauseMsOverride}) {
+    if (_fullText.isEmpty || targetCpm <= 0) return;
+    final words = _words.isEmpty ? _splitWithOffsets(_fullText) : _words;
+    if (words.isEmpty) return;
 
+    final totalCharsNoSpace = words.fold<int>(0, (sum, w) => sum + w.value.length);
+    final pauseCount = words.length > 1 ? words.length - 1 : 0;
+    final effectivePauseMs = pauseMsOverride ?? pauseMs;
+
+    final targetTotalSeconds = totalCharsNoSpace / targetCpm * 60.0;
+    final pauseTotalSeconds = (pauseCount * effectivePauseMs) / 1000.0;
+    final speechTimeBudget = (targetTotalSeconds - pauseTotalSeconds).clamp(0.5, double.infinity);
+
+    // 기준: rate 0.5 → 글자당 0.18초. rate가 2배면 시간 절반(반비례) 가정.
+    const double baseRate = 0.5;
+    const double baseSecPerChar = 0.18;
+    final neededSecPerChar = speechTimeBudget / totalCharsNoSpace;
+    double estimatedRate = baseRate * (baseSecPerChar / neededSecPerChar);
+
+    speed = estimatedRate.clamp(0.1, 1.0);
+    if (pauseMsOverride != null) pauseMs = pauseMsOverride;
+    notifyListeners();
+  }
   Future<void> applySettings() async {
     await _tts.setSpeechRate(speed);
     await _tts.setVolume(volume);
@@ -425,7 +449,7 @@ class TtsControlBar extends StatefulWidget {
 class _TtsControlBarState extends State<TtsControlBar> {
   bool _showSettings = false;
   Timer? _uiTimer;
-
+ final _targetCpmCtrl = TextEditingController(text: '160');
   @override
   void initState() {
     super.initState();
@@ -448,6 +472,7 @@ class _TtsControlBarState extends State<TtsControlBar> {
   void dispose() {
     TtsController.instance.removeListener(_rebuild);
     _uiTimer?.cancel();
+    _targetCpmCtrl.dispose();
     super.dispose();
   }
 
@@ -597,6 +622,55 @@ class _TtsControlBarState extends State<TtsControlBar> {
               value: tts.pauseMs, min: 0, max: 1000, divisions: 20,
               displayText: '${tts.pauseMs.round()}ms',
               onChanged: (v) { tts.pauseMs = v; setState(() {}); }),
+          const SizedBox(height: 14),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(10)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  const Icon(Icons.auto_awesome_rounded, size: 14, color: kBlueDark),
+                  const SizedBox(width: 4),
+                  const Text('목표 타수에 맞춰 속도 자동 설정',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: kBlueDark)),
+                ]),
+                const SizedBox(height: 8),
+                Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _targetCpmCtrl,
+                      keyboardType: TextInputType.number,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        suffixText: '자/분',
+                        suffixStyle: const TextStyle(fontSize: 11, color: Colors.grey),
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        filled: true, fillColor: Colors.white,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () {
+                      final target = double.tryParse(_targetCpmCtrl.text.trim());
+                      if (target == null || target <= 0) return;
+                      tts.autoTuneSpeed(targetCpm: target);
+                      setState(() {});
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: kBlue, foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    child: const Text('적용', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                  ),
+                ]),
+                const SizedBox(height: 4),
+                Text('현재 포즈(${tts.pauseMs.round()}ms) 기준으로 속도를 계산해요',
+                    style: const TextStyle(fontSize: 10, color: Colors.grey)),
+              ]),
+            ),
           ])),
       ],
     ]);
