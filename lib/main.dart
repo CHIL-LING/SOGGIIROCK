@@ -12,6 +12,8 @@ void main() async {
   await Hive.openBox('sentences');
   await Hive.openBox('reminders');
   await Hive.openBox('groups');
+  await Hive.openBox('groups');
+  await Hive.openBox('settings'); // 추가
   runApp(const SoggiApp());
 }
 
@@ -409,24 +411,30 @@ class TtsController extends ChangeNotifier {
       notifyListeners();
     }
   }
-// 목표 CPM(공백 제외 글자/분)과 포즈 시간(ms)에 맞춰 속도를 자동 추정
-  // 기준점: speechRate 0.5일 때 평균적으로 글자당 약 0.18초 소요된다고 가정 (경험적 근사치)
+// 목표 CPM(공백 제외)과 포즈 시간에 맞춰 speechRate 자동 추정
+  // 보정값: rate=0.5일 때 글자당 실측 약 0.045초 (한국어 기준 경험치)
   void autoTuneSpeed({required double targetCpm, double? pauseMsOverride}) {
-    if (_fullText.isEmpty || targetCpm <= 0) return;
-    final words = _words.isEmpty ? _splitWithOffsets(_fullText) : _words;
-    if (words.isEmpty) return;
+    if (targetCpm <= 0) return;
 
-    final totalCharsNoSpace = words.fold<int>(0, (sum, w) => sum + w.value.length);
+    // 텍스트가 아직 없으면 words 기준이 없으므로 단어수 추정 불가 → 단순 속도만 조정
+    final words = _words.isEmpty ? _splitWithOffsets(_fullText) : _words;
+    final totalCharsNoSpace = words.isEmpty
+        ? 100 // 텍스트 없을 때 기본값으로 100자 가정
+        : words.fold<int>(0, (sum, w) => sum + w.value.length);
     final pauseCount = words.length > 1 ? words.length - 1 : 0;
     final effectivePauseMs = pauseMsOverride ?? pauseMs;
 
+    // 목표 총 시간(초)
     final targetTotalSeconds = totalCharsNoSpace / targetCpm * 60.0;
+    // 포즈로 쓰이는 시간(초)
     final pauseTotalSeconds = (pauseCount * effectivePauseMs) / 1000.0;
+    // 실제 발화에 써야 할 시간(초)
     final speechTimeBudget = (targetTotalSeconds - pauseTotalSeconds).clamp(0.5, double.infinity);
 
-    // 기준: rate 0.5 → 글자당 0.18초. rate가 2배면 시간 절반(반비례) 가정.
+    // 기준: rate=0.5 → 글자당 0.045초 (실측 보정값)
+    // rate와 발화시간은 반비례: rate = 0.5 * (기준시간 / 필요시간)
     const double baseRate = 0.5;
-    const double baseSecPerChar = 0.18;
+    const double baseSecPerChar = 0.045;
     final neededSecPerChar = speechTimeBudget / totalCharsNoSpace;
     double estimatedRate = baseRate * (baseSecPerChar / neededSecPerChar);
 
@@ -822,13 +830,12 @@ class _MainShellState extends State<MainShell> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkTodayReminders());
   }
-  void _checkTodayReminders() {
+void _checkTodayReminders() {
     final today = _todayStr();
 
-    // "오늘 다시 보지 않음"을 눌렀는지 확인
-    final dismissedBox = Hive.box('reminders');
+    final settingsBox = Hive.box('settings');
     final dismissedKey = '_dismissed_$today';
-    if (dismissedBox.get(dismissedKey) == true) return;
+    if (settingsBox.get(dismissedKey) == true) return;
 
     final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
     if (reminders.isEmpty) return;
@@ -904,7 +911,7 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
               ]),
               TextButton.icon(
                 onPressed: () {
-                  Hive.box('reminders').put('_dismissed_${widget.todayKey}', true);
+                  Hive.box('settings').put('_dismissed_${widget.todayKey}', true);
                   Navigator.pop(context);
                 },
                 icon: const Icon(Icons.visibility_off_rounded, size: 14, color: Colors.white70),
