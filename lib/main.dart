@@ -12,7 +12,6 @@ void main() async {
   await Hive.openBox('sentences');
   await Hive.openBox('reminders');
   await Hive.openBox('groups');
-  await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
   runApp(const SoggiApp());
 }
@@ -280,12 +279,16 @@ class TtsController extends ChangeNotifier {
   Duration get elapsed => _stopwatch.elapsed;
   int get charsReadSoFar {
     if (_words.isEmpty || _currentIndex == 0) return 0;
-    final idx = (_currentIndex - 1).clamp(0, _words.length - 1);
-    return _words[idx].key + _words[idx].value.length;
+    final readCount = _currentIndex.clamp(0, _words.length);
+    int total = 0;
+    for (int i = 0; i < readCount; i++) {
+      total += _words[i].value.length;
+    }
+    return total;
   }
   double get cpm {
     final mins = _stopwatch.elapsed.inMilliseconds / 60000.0;
-    if (mins <= 0) return 0;
+    if (mins <= 0.0005) return 0;
     return charsReadSoFar / mins;
   }
 
