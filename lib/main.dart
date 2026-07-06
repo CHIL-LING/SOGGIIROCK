@@ -824,9 +824,9 @@ class MainShell extends StatefulWidget {
 }
 class _MainShellState extends State<MainShell> {
   int _idx = 0;
-  final _screens = const [
+final _screens = const [
     HomeScreen(), SentenceAnalyzerScreen(), SearchScreen(),
-    SentenceRegisterScreen(), RemindersScreen(),
+    SentenceRegisterScreen(), RemindersScreen(), QuizScreen(),
   ];
   @override
   void initState() {
@@ -877,6 +877,7 @@ void _checkTodayReminders() {
           BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.menu_book_rounded)), label: '약어검색'),
           BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
           BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
+          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
         ]))));
 }
 
@@ -3021,4 +3022,540 @@ void _showBulkReminderDialog(BuildContext context, List<String> targets, String 
           if (ctx.mounted) Navigator.pop(ctx);
         }, child: const Text('설정')),
     ])));
+}
+
+// ── 퀴즈 화면 ────────────────────────────────────────────────────────
+class QuizScreen extends StatefulWidget {
+  const QuizScreen({super.key});
+  @override State<QuizScreen> createState() => _QuizScreenState();
+}
+
+class _QuizScreenState extends State<QuizScreen> {
+  // 설정
+  String _mode = 'abbr'; // 'abbr' or 'sentence'
+  String? _filterGroupId;
+  int _quizCount = 10;
+  
+  // 퀴즈 진행
+  List<dynamic> _questions = [];
+  int _currentIdx = 0;
+  bool _started = false;
+  bool _finished = false;
+  
+  // 채점
+  final _answerCtrl = TextEditingController();
+  List<Map<String, dynamic>> _results = []; // {question, userAnswer, correct, wrong}
+  Map<String, int> _wrongCounts = {}; // 많이 틀린 순
+  
+  // TTS
+  bool _ttsPlayed = false;
+
+  @override
+  void dispose() {
+    _answerCtrl.dispose();
+    TtsController.instance.stop();
+    super.dispose();
+  }
+
+  List<dynamic> _buildQuestions() {
+    final abbrevs = Store.getAbbreviations();
+    final sentences = Store.getSentences();
+    List<dynamic> pool = [];
+    if (_mode == 'abbr' || _mode == 'both') {
+      var filtered = abbrevs;
+      if (_filterGroupId != null) {
+        filtered = abbrevs.where((a) => a.groupId == _filterGroupId).toList();
+      }
+      pool.addAll(filtered);
+    }
+    if (_mode == 'sentence' || _mode == 'both') {
+      pool.addAll(sentences);
+    }
+    pool.shuffle();
+    final count = _quizCount.clamp(1, pool.length);
+    return pool.take(count).toList();
+  }
+
+  void _start() {
+    final qs = _buildQuestions();
+    if (qs.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('문제가 없어요. 약어나 문장을 먼저 등록해주세요.'),
+            backgroundColor: kBlue));
+      return;
+    }
+    setState(() {
+      _questions = qs;
+      _currentIdx = 0;
+      _results = [];
+      _wrongCounts = {};
+      _started = true;
+      _finished = false;
+      _ttsPlayed = false;
+      _answerCtrl.clear();
+    });
+    _playCurrentTts();
+  }
+
+  void _playCurrentTts() async {
+    if (_currentIdx >= _questions.length) return;
+    final q = _questions[_currentIdx];
+    final text = q is AbbreviationModel
+        ? q.displayWord.replaceAll('*', ' ')
+        : (q as SavedSentenceModel).text;
+    await TtsController.instance.speak(text);
+    setState(() => _ttsPlayed = true);
+  }
+
+  // diff 알고리즘: 빠진/틀린 단어만 찾기 (순서 밀림 방지)
+  List<String> _findWrong(List<String> answer, List<String> correct) {
+    // LCS 기반으로 매칭된 정답 단어 찾기
+    final n = correct.length, m = answer.length;
+    final dp = List.generate(n + 1, (_) => List.filled(m + 1, 0));
+    for (int i = 1; i <= n; i++) {
+      for (int j = 1; j <= m; j++) {
+        if (correct[i-1] == answer[j-1]) dp[i][j] = dp[i-1][j-1] + 1;
+        else dp[i][j] = dp[i-1][j] > dp[i][j-1] ? dp[i-1][j] : dp[i][j-1];
+      }
+    }
+    // 매칭 안 된 정답 단어 = 틀린 것
+    final matched = <int>{};
+    int i = n, j = m;
+    while (i > 0 && j > 0) {
+      if (correct[i-1] == answer[j-1]) { matched.add(i-1); i--; j--; }
+      else if (dp[i-1][j] > dp[i][j-1]) i--;
+      else j--;
+    }
+    final wrong = <String>[];
+    for (int k = 0; k < correct.length; k++) {
+      if (!matched.contains(k)) wrong.add(correct[k]);
+    }
+    return wrong;
+  }
+
+  void _submit() {
+    if (_currentIdx >= _questions.length) return;
+    final q = _questions[_currentIdx];
+    final correctText = q is AbbreviationModel
+        ? q.displayWord.replaceAll('*', ' ')
+        : (q as SavedSentenceModel).text;
+    final userText = _answerCtrl.text.trim();
+
+    final correctWords = correctText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final userWords = userText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final wrongWords = _findWrong(userWords, correctWords);
+
+    _results.add({
+      'question': correctText,
+      'userAnswer': userText,
+      'correct': wrongWords.isEmpty,
+      'wrong': wrongWords,
+      'item': q,
+    });
+
+    for (final w in wrongWords) {
+      _wrongCounts[w] = (_wrongCounts[w] ?? 0) + 1;
+    }
+
+    if (_currentIdx < _questions.length - 1) {
+      setState(() {
+        _currentIdx++;
+        _ttsPlayed = false;
+        _answerCtrl.clear();
+      });
+      _playCurrentTts();
+    } else {
+      TtsController.instance.stop();
+      setState(() => _finished = true);
+    }
+  }
+
+  void _retryWrong() {
+    final wrongItems = _results.where((r) => !(r['correct'] as bool)).map((r) => r['item']).toList();
+    if (wrongItems.isEmpty) return;
+    setState(() {
+      _questions = wrongItems..shuffle();
+      _currentIdx = 0;
+      _results = [];
+      _wrongCounts = {};
+      _finished = false;
+      _ttsPlayed = false;
+      _answerCtrl.clear();
+    });
+    _playCurrentTts();
+  }
+
+  void _retryAll() {
+    setState(() {
+      _started = false;
+      _finished = false;
+      _results = [];
+      _wrongCounts = {};
+      _answerCtrl.clear();
+    });
+  }
+
+  Future<void> _saveWrongAsGroup(List<dynamic> wrongItems) async {
+    if (wrongItems.isEmpty) return;
+    final nameCtrl = TextEditingController(text: '오답노트 ${DateTime.now().month}/${DateTime.now().day}');
+    Color selectedColor = kGroupColors[0];
+    await showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('오답 그룹 저장', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        _lbl('그룹 이름'),
+        TextField(controller: nameCtrl, decoration: _inputDeco('')),
+        const SizedBox(height: 12),
+        _lbl('색상'),
+        Wrap(spacing: 8, runSpacing: 8, children: kGroupColors.map((c) => GestureDetector(
+          onTap: () => setS(() => selectedColor = c),
+          child: Container(width: 28, height: 28,
+            decoration: BoxDecoration(color: c, shape: BoxShape.circle,
+              border: Border.all(color: selectedColor.value == c.value ? Colors.black : Colors.transparent, width: 2)),
+            child: selectedColor.value == c.value ? const Icon(Icons.check, color: Colors.white, size: 14) : null))).toList()),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+          onPressed: () async {
+            final name = nameCtrl.text.trim();
+            if (name.isEmpty) return;
+            final gid = DateTime.now().millisecondsSinceEpoch.toString();
+            await Store.saveGroup(GroupModel(id: gid, name: name, colorValue: selectedColor.value));
+            for (final item in wrongItems) {
+              if (item is AbbreviationModel) {
+                await Store.saveAbbreviation(item.copyWith(groupId: gid));
+              }
+            }
+            if (ctx.mounted) Navigator.pop(ctx);
+            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('$name 그룹에 저장했어요'), backgroundColor: kBlue,
+                  duration: const Duration(seconds: 2)));
+          },
+          child: const Text('저장')),
+      ])));
+  }
+
+  void _copyForAI(List<dynamic> wrongItems) {
+    final words = wrongItems
+        .whereType<AbbreviationModel>()
+        .map((a) => a.displayWord.replaceAll('*', ' '))
+        .join(', ');
+    final prompt = '다음 약어들을 모두 포함한 자연스러운 한국어 문장을 만들어줘: $words';
+    Clipboard.setData(ClipboardData(text: prompt));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('AI 문장 생성 프롬프트가 복사됐어요'), backgroundColor: kBlue,
+          duration: Duration(seconds: 2)));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder(valueListenable: Hive.box('abbreviations').listenable(),
+      builder: (context, _, __) => ValueListenableBuilder(
+        valueListenable: Hive.box('sentences').listenable(),
+        builder: (context, __, ___) {
+          if (!_started) return _buildSetup();
+          if (_finished) return _buildResult();
+          return _buildQuiz();
+        }));
+  }
+
+  // ── 설정 화면 ──
+  Widget _buildSetup() {
+    final groups = Store.getGroups();
+    return Scaffold(backgroundColor: Colors.white,
+      body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('퀴즈 설정', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 24),
+
+        // 모드 선택
+        _lbl('테스트 유형'),
+        Row(children: [
+          _ModeChip(label: '약어', value: 'abbr', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+          const SizedBox(width: 8),
+          _ModeChip(label: '문장', value: 'sentence', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+          const SizedBox(width: 8),
+          _ModeChip(label: '둘 다', value: 'both', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+        ]),
+        const SizedBox(height: 20),
+
+        // 그룹 필터 (약어 모드일 때만)
+        if (_mode == 'abbr' && groups.isNotEmpty) ...[
+          _lbl('그룹 필터'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            GestureDetector(
+              onTap: () => setState(() => _filterGroupId = null),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _filterGroupId == null ? kBlue : kBlueLight,
+                  borderRadius: BorderRadius.circular(20)),
+                child: Text('전체', style: TextStyle(
+                    color: _filterGroupId == null ? Colors.white : kBlue,
+                    fontWeight: FontWeight.w700, fontSize: 12)))),
+            ...groups.map((g) => GestureDetector(
+              onTap: () => setState(() => _filterGroupId = g.id),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _filterGroupId == g.id ? g.color : kBlueLight,
+                  borderRadius: BorderRadius.circular(20)),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  CircleAvatar(backgroundColor: _filterGroupId == g.id ? Colors.white : g.color, radius: 5),
+                  const SizedBox(width: 5),
+                  Text(g.name, style: TextStyle(
+                      color: _filterGroupId == g.id ? Colors.white : g.color,
+                      fontWeight: FontWeight.w700, fontSize: 12)),
+                ])))),
+          ]),
+          const SizedBox(height: 20),
+        ],
+
+        // 문제 수 설정
+        _lbl('문제 수'),
+        Row(children: [
+          Expanded(child: Slider(
+            value: _quizCount.toDouble(),
+            min: 1, max: 50, divisions: 49,
+            activeColor: kBlue, inactiveColor: kBlueLight,
+            onChanged: (v) => setState(() => _quizCount = v.round()))),
+          Container(
+            width: 48, padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+            child: Text('$_quizCount', textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16))),
+        ]),
+        const SizedBox(height: 8),
+        Text(() {
+          final abbrevs = Store.getAbbreviations();
+          final sentences = Store.getSentences();
+          int total = 0;
+          if (_mode == 'abbr') {
+            total = _filterGroupId != null
+                ? abbrevs.where((a) => a.groupId == _filterGroupId).length
+                : abbrevs.length;
+          } else if (_mode == 'sentence') {
+            total = sentences.length;
+          } else {
+            total = abbrevs.length + sentences.length;
+          }
+          return '전체 $total개 중 $_quizCount개 랜덤 출제';
+        }(), style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        const SizedBox(height: 32),
+
+        SizedBox(width: double.infinity, child: ElevatedButton(
+          onPressed: _start,
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+          child: const Text('테스트 시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)))),
+      ]))));
+  }
+
+  // ── 퀴즈 진행 화면 ──
+  Widget _buildQuiz() {
+    final tts = TtsController.instance;
+    final progress = (_currentIdx + 1) / _questions.length;
+    return Scaffold(backgroundColor: Colors.white,
+      body: SafeArea(child: Column(children: [
+        // 헤더
+        Padding(padding: const EdgeInsets.fromLTRB(20, 16, 20, 0), child: Column(children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('${_currentIdx + 1} / ${_questions.length}',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: kBlueDark)),
+            TextButton(onPressed: () => setState(() { _started = false; TtsController.instance.stop(); }),
+              child: const Text('그만하기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+          ]),
+          const SizedBox(height: 6),
+          LinearProgressIndicator(value: progress, backgroundColor: kBlueLight, color: kBlue,
+              borderRadius: BorderRadius.circular(4), minHeight: 6),
+        ])),
+
+        Expanded(child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const SizedBox(height: 16),
+
+            // TTS 재생 버튼
+            Center(child: GestureDetector(
+              onTap: _playCurrentTts,
+              child: Container(
+                width: 80, height: 80,
+                decoration: BoxDecoration(
+                  color: tts.playing ? kBlue : kBlueLight,
+                  shape: BoxShape.circle,
+                  boxShadow: [BoxShadow(color: kBlue.withOpacity(0.2), blurRadius: 12, spreadRadius: 2)]),
+                child: Icon(tts.playing ? Icons.volume_up_rounded : Icons.play_circle_rounded,
+                    color: tts.playing ? Colors.white : kBlue, size: 36)))),
+            const SizedBox(height: 8),
+            Center(child: Text(
+              tts.playing ? '읽는 중...' : (_ttsPlayed ? '다시 듣기' : '눌러서 듣기'),
+              style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
+
+            const SizedBox(height: 32),
+
+            // 입력창
+            _lbl('들은 내용을 입력하세요'),
+            TextField(
+              controller: _answerCtrl,
+              maxLines: 4,
+              autofocus: true,
+              decoration: InputDecoration(
+                hintText: '여기에 입력...',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: kBlue))),
+            ),
+            const SizedBox(height: 16),
+
+            SizedBox(width: double.infinity, child: ElevatedButton(
+              onPressed: _submit,
+              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+              child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음' : '제출 → 결과 보기',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)))),
+          ]))),
+      ])));
+  }
+
+  // ── 결과 화면 ──
+  Widget _buildResult() {
+    final total = _results.length;
+    final correct = _results.where((r) => r['correct'] as bool).length;
+    final wrongResults = _results.where((r) => !(r['correct'] as bool)).toList();
+    final wrongItems = wrongResults.map((r) => r['item']).toList();
+    final wrongAbbrItems = wrongItems.whereType<AbbreviationModel>().toList();
+
+    // 많이 틀린 단어 순 정렬
+    final sortedWrong = _wrongCounts.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return Scaffold(backgroundColor: Colors.white,
+      body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('결과', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const SizedBox(height: 16),
+
+        // 점수 카드
+        Container(
+          width: double.infinity, padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(16)),
+          child: Column(children: [
+            Text('$correct / $total',
+                style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w900, color: kBlueDark)),
+            Text('${(correct / total * 100).round()}점',
+                style: const TextStyle(fontSize: 18, color: kBlue, fontWeight: FontWeight.w700)),
+          ])),
+        const SizedBox(height: 20),
+
+        // 다시 시작 버튼
+        Row(children: [
+          Expanded(child: OutlinedButton.icon(
+            onPressed: wrongResults.isEmpty ? null : _retryWrong,
+            icon: const Icon(Icons.refresh_rounded, size: 16),
+            label: const Text('틀린 것만 다시'),
+            style: OutlinedButton.styleFrom(foregroundColor: kBlue, side: const BorderSide(color: kBlue),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                padding: const EdgeInsets.symmetric(vertical: 12)))),
+          const SizedBox(width: 10),
+          Expanded(child: ElevatedButton.icon(
+            onPressed: _retryAll,
+            icon: const Icon(Icons.casino_rounded, size: 16),
+            label: const Text('처음부터 다시'),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                padding: const EdgeInsets.symmetric(vertical: 12)))),
+        ]),
+        const SizedBox(height: 20),
+
+        // 오답 목록
+        if (wrongResults.isNotEmpty) ...[
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text('틀린 문제 (${wrongResults.length}개)',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.grey)),
+            Row(children: [
+              if (wrongAbbrItems.isNotEmpty) ...[
+                GestureDetector(
+                  onTap: () => _copyForAI(wrongAbbrItems),
+                  child: _actionChip(Icons.content_copy_rounded, 'AI 복사', kBlueSky)),
+                const SizedBox(width: 6),
+                GestureDetector(
+                  onTap: () => _saveWrongAsGroup(wrongAbbrItems),
+                  child: _actionChip(Icons.folder_rounded, '그룹 저장', kBlue)),
+              ],
+            ]),
+          ]),
+          const SizedBox(height: 8),
+          ...wrongResults.map((r) {
+            final wrongWords = (r['wrong'] as List<String>);
+            return Container(
+              margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFFFFE0E0))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  const Icon(Icons.close_rounded, color: Colors.red, size: 14),
+                  const SizedBox(width: 4),
+                  Expanded(child: Text(r['question'] as String,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
+                ]),
+                const SizedBox(height: 4),
+                Text('내 답: ${r['userAnswer']}',
+                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                if (wrongWords.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Wrap(spacing: 4, children: wrongWords.map((w) => Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(4)),
+                    child: Text(w, style: const TextStyle(fontSize: 11, color: Colors.red, fontWeight: FontWeight.w700)))).toList()),
+                ],
+              ]));
+          }),
+          const SizedBox(height: 20),
+        ],
+
+        // 많이 틀린 단어 순위
+        if (sortedWrong.isNotEmpty) ...[
+          const Text('많이 틀린 단어',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.grey)),
+          const SizedBox(height: 8),
+          ...sortedWrong.take(10).map((e) => Container(
+            margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFFFE0B0))),
+            child: Row(children: [
+              Expanded(child: Text(e.key,
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
+              Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(color: const Color(0xFFFF9800), borderRadius: BorderRadius.circular(10)),
+                child: Text('${e.value}회',
+                    style: const TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w700))),
+            ]))),
+        ],
+      ]))));
+  }
+}
+
+class _ModeChip extends StatelessWidget {
+  final String label, value, selected;
+  final void Function(String) onTap;
+  const _ModeChip({required this.label, required this.value, required this.selected, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    final isSel = value == selected;
+    return GestureDetector(
+      onTap: () => onTap(value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSel ? kBlue : kBlueLight,
+          borderRadius: BorderRadius.circular(20)),
+        child: Text(label, style: TextStyle(
+            color: isSel ? Colors.white : kBlue,
+            fontWeight: FontWeight.w700, fontSize: 13))));
+  }
 }
