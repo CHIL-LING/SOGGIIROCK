@@ -3316,11 +3316,32 @@ class _QuizScreenState extends State<QuizScreen> {
         // 문제 수 설정
         _lbl('문제 수'),
         Row(children: [
-          Expanded(child: Slider(
-            value: _quizCount.toDouble(),
-            min: 1, max: 50, divisions: 49,
-            activeColor: kBlue, inactiveColor: kBlueLight,
-            onChanged: (v) => setState(() => _quizCount = v.round()))),
+          Expanded(child: Builder(builder: (context) {
+            final abbrevs = Store.getAbbreviations();
+            final sentences = Store.getSentences();
+            int maxCount = 0;
+            if (_mode == 'abbr') {
+              maxCount = _filterGroupId != null
+                  ? abbrevs.where((a) => a.groupId == _filterGroupId).length
+                  : abbrevs.length;
+            } else if (_mode == 'sentence') {
+              maxCount = sentences.length;
+            } else {
+              maxCount = abbrevs.length + sentences.length;
+            }
+            maxCount = maxCount.clamp(1, 9999);
+            if (_quizCount > maxCount) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) setState(() => _quizCount = maxCount);
+              });
+            }
+            return Slider(
+              value: _quizCount.toDouble().clamp(1, maxCount.toDouble()),
+              min: 1, max: maxCount.toDouble(),
+              divisions: (maxCount - 1).clamp(1, 9998),
+              activeColor: kBlue, inactiveColor: kBlueLight,
+              onChanged: (v) => setState(() => _quizCount = v.round()));
+          })),
           Container(
             width: 48, padding: const EdgeInsets.symmetric(vertical: 6),
             decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
