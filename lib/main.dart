@@ -3421,10 +3421,12 @@ class _QuizScreenState extends State<QuizScreen> {
             _lbl('들은 내용을 입력하세요'),
             TextField(
               controller: _answerCtrl,
-              maxLines: 4,
+              maxLines: 1,
               autofocus: true,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _submit(),
               decoration: InputDecoration(
-                hintText: '여기에 입력...',
+                hintText: '여기에 입력 후 엔터로 제출...',
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                     borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                 focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
