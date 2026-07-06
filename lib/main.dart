@@ -3049,13 +3049,11 @@ class _QuizScreenState extends State<QuizScreen> {
   
   // TTS
   bool _ttsPlayed = false;
-  bool _ttsPlayed = false;
   final _inputFocusNode = FocusNode();
   final _keyboardFocusNode = FocusNode();
 
   @override
   void dispose() {
-    _answerCtrl.dispose();
     _answerCtrl.dispose();
     _inputFocusNode.dispose();
     _keyboardFocusNode.dispose();
@@ -3368,8 +3366,21 @@ class _QuizScreenState extends State<QuizScreen> {
               if (n != null && n > 0) setState(() => _quizCount = n);
             },
           )),
+       ]),
+        const SizedBox(height: 32),
+
+        // 시작 버튼
+        SizedBox(width: double.infinity, child: ElevatedButton(
+          onPressed: _start,
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+          child: const Text('퀴즈 시작하기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)))),
+      ]))));
+  }
+
   // ── 퀴즈 진행 화면 ──
- Widget _buildQuiz() {
+  Widget _buildQuiz() {
     final tts = TtsController.instance;
     final progress = (_currentIdx + 1) / _questions.length;
     return Scaffold(backgroundColor: Colors.white,
