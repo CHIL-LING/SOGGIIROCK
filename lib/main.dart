@@ -3049,10 +3049,16 @@ class _QuizScreenState extends State<QuizScreen> {
   
   // TTS
   bool _ttsPlayed = false;
+  bool _ttsPlayed = false;
+  final _inputFocusNode = FocusNode();
+  final _keyboardFocusNode = FocusNode();
 
   @override
   void dispose() {
     _answerCtrl.dispose();
+    _answerCtrl.dispose();
+    _inputFocusNode.dispose();
+    _keyboardFocusNode.dispose();
     TtsController.instance.stop();
     super.dispose();
   }
@@ -3164,6 +3170,9 @@ class _QuizScreenState extends State<QuizScreen> {
         _answerCtrl.clear();
       });
       _playCurrentTts();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _inputFocusNode.requestFocus();
+      });
     } else {
       TtsController.instance.stop();
       setState(() => _finished = true);
@@ -3342,107 +3351,102 @@ class _QuizScreenState extends State<QuizScreen> {
               activeColor: kBlue, inactiveColor: kBlueLight,
               onChanged: (v) => setState(() => _quizCount = v.round()));
           })),
-          Container(
-            width: 48, padding: const EdgeInsets.symmetric(vertical: 6),
-            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-            child: Text('$_quizCount', textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16))),
-        ]),
-        const SizedBox(height: 8),
-        Text(() {
-          final abbrevs = Store.getAbbreviations();
-          final sentences = Store.getSentences();
-          int total = 0;
-          if (_mode == 'abbr') {
-            total = _filterGroupId != null
-                ? abbrevs.where((a) => a.groupId == _filterGroupId).length
-                : abbrevs.length;
-          } else if (_mode == 'sentence') {
-            total = sentences.length;
-          } else {
-            total = abbrevs.length + sentences.length;
-          }
-          return '전체 $total개 중 $_quizCount개 랜덤 출제';
-        }(), style: const TextStyle(fontSize: 12, color: Colors.grey)),
-        const SizedBox(height: 32),
-
-        SizedBox(width: double.infinity, child: ElevatedButton(
-          onPressed: _start,
-          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
-          child: const Text('테스트 시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)))),
-      ]))));
-  }
-
+          // 숫자 직접 입력
+          SizedBox(width: 64, child: TextField(
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: '$_quizCount',
+              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              filled: true, fillColor: kBlueLight,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
+            onSubmitted: (v) {
+              final n = int.tryParse(v);
+              if (n != null && n > 0) setState(() => _quizCount = n);
+            },
+          )),
   // ── 퀴즈 진행 화면 ──
-  Widget _buildQuiz() {
+ Widget _buildQuiz() {
     final tts = TtsController.instance;
     final progress = (_currentIdx + 1) / _questions.length;
     return Scaffold(backgroundColor: Colors.white,
-      body: SafeArea(child: Column(children: [
-        // 헤더
-        Padding(padding: const EdgeInsets.fromLTRB(20, 16, 20, 0), child: Column(children: [
-          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text('${_currentIdx + 1} / ${_questions.length}',
-                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: kBlueDark)),
-            TextButton(onPressed: () => setState(() { _started = false; TtsController.instance.stop(); }),
-              child: const Text('그만하기', style: TextStyle(color: Colors.grey, fontSize: 12))),
-          ]),
-          const SizedBox(height: 6),
-          LinearProgressIndicator(value: progress, backgroundColor: kBlueLight, color: kBlue,
-              borderRadius: BorderRadius.circular(4), minHeight: 6),
-        ])),
+      body: SafeArea(child: KeyboardListener(
+        focusNode: _keyboardFocusNode,
+        autofocus: true,
+        onKeyEvent: (event) {
+          if (event is KeyDownEvent &&
+              event.logicalKey == LogicalKeyboardKey.space &&
+              !_inputFocusNode.hasFocus) {
+            _playCurrentTts();
+          }
+        },
+        child: Column(children: [
+          // 헤더
+          Padding(padding: const EdgeInsets.fromLTRB(20, 16, 20, 0), child: Column(children: [
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              Text('${_currentIdx + 1} / ${_questions.length}',
+                  style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: kBlueDark)),
+              TextButton(onPressed: () => setState(() { _started = false; TtsController.instance.stop(); }),
+                child: const Text('그만하기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+            ]),
+            const SizedBox(height: 6),
+            LinearProgressIndicator(value: progress, backgroundColor: kBlueLight, color: kBlue,
+                borderRadius: BorderRadius.circular(4), minHeight: 6),
+          ])),
 
-        Expanded(child: SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const SizedBox(height: 16),
+          Expanded(child: SingleChildScrollView(
+            padding: const EdgeInsets.all(20),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              const SizedBox(height: 16),
 
-            // TTS 재생 버튼
-            Center(child: GestureDetector(
-              onTap: _playCurrentTts,
-              child: Container(
-                width: 80, height: 80,
-                decoration: BoxDecoration(
-                  color: tts.playing ? kBlue : kBlueLight,
-                  shape: BoxShape.circle,
-                  boxShadow: [BoxShadow(color: kBlue.withOpacity(0.2), blurRadius: 12, spreadRadius: 2)]),
-                child: Icon(tts.playing ? Icons.volume_up_rounded : Icons.play_circle_rounded,
-                    color: tts.playing ? Colors.white : kBlue, size: 36)))),
-            const SizedBox(height: 8),
-            Center(child: Text(
-              tts.playing ? '읽는 중...' : (_ttsPlayed ? '다시 듣기' : '눌러서 듣기'),
-              style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
+              // TTS 재생 버튼
+              Center(child: GestureDetector(
+                onTap: _playCurrentTts,
+                child: Container(
+                  width: 80, height: 80,
+                  decoration: BoxDecoration(
+                    color: tts.playing ? kBlue : kBlueLight,
+                    shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: kBlue.withOpacity(0.2), blurRadius: 12, spreadRadius: 2)]),
+                  child: Icon(tts.playing ? Icons.volume_up_rounded : Icons.play_circle_rounded,
+                      color: tts.playing ? Colors.white : kBlue, size: 36)))),
+              const SizedBox(height: 6),
+              Center(child: Text(
+                tts.playing ? '읽는 중... (Space로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Space)' : '눌러서 듣기'),
+                style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
 
-            const SizedBox(height: 32),
+              const SizedBox(height: 32),
 
-            // 입력창
-            _lbl('들은 내용을 입력하세요'),
-            TextField(
-              controller: _answerCtrl,
-              maxLines: 1,
-              autofocus: true,
-              textInputAction: TextInputAction.done,
-              onSubmitted: (_) => _submit(),
-              decoration: InputDecoration(
-                hintText: '여기에 입력 후 엔터로 제출...',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: kBlue))),
-            ),
-            const SizedBox(height: 16),
+              // 입력창
+              _lbl('들은 내용을 입력하세요'),
+              TextField(
+                controller: _answerCtrl,
+                focusNode: _inputFocusNode,
+                maxLines: 1,
+                autofocus: true,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _submit(),
+                decoration: InputDecoration(
+                  hintText: '여기에 입력 후 엔터로 제출...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: kBlue))),
+              ),
+              const SizedBox(height: 16),
 
-            SizedBox(width: double.infinity, child: ElevatedButton(
-              onPressed: _submit,
-              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 14),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음' : '제출 → 결과 보기',
-                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)))),
-          ]))),
-      ])));
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: _submit,
+                style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음' : '제출 → 결과 보기',
+                    style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)))),
+            ]))),
+        ]))));
   }
 
   // ── 결과 화면 ──
