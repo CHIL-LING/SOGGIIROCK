@@ -292,13 +292,19 @@ class TtsController extends ChangeNotifier {
     return charsReadSoFar / mins;
   }
 
-  void _init() {
+void _init() async {
+    // 저장된 속도 불러오기
+    final box = Hive.box('settings');
+    speed  = (box.get('tts_speed',  defaultValue: 0.5) as num).toDouble();
+    volume = (box.get('tts_volume', defaultValue: 1.0) as num).toDouble();
+    pitch  = (box.get('tts_pitch',  defaultValue: 1.0) as num).toDouble();
+    pauseMs = (box.get('tts_pause', defaultValue: 250.0) as num).toDouble();
+
     _tts.setLanguage('ko-KR');
     _tts.setSpeechRate(speed);
     _tts.setVolume(volume);
     _tts.setPitch(pitch);
   }
-
   List<MapEntry<int, String>> _splitWithOffsets(String text) {
     final result = <MapEntry<int, String>>[];
     final regex = RegExp(r'\S+');
@@ -3111,22 +3117,30 @@ class _QuizScreenState extends State<QuizScreen> {
     setState(() => _ttsPlayed = true);
   }
 
+  // 을/를, 와/과, 으로/므로 쌍 정규화
+  String _normalizeJosa(String word) {
+    if (word.endsWith('를')) return word.substring(0, word.length - 1) + '을';
+    if (word.endsWith('와')) return word.substring(0, word.length - 1) + '과';
+    if (word.endsWith('므로')) return word.substring(0, word.length - 2) + '으로';
+    return word;
+  }
+
   // diff 알고리즘: 빠진/틀린 단어만 찾기 (순서 밀림 방지)
   List<String> _findWrong(List<String> answer, List<String> correct) {
-    // LCS 기반으로 매칭된 정답 단어 찾기
-    final n = correct.length, m = answer.length;
+    final normAnswer = answer.map(_normalizeJosa).toList();
+    final normCorrect = correct.map(_normalizeJosa).toList();
+    final n = normCorrect.length, m = normAnswer.length;
     final dp = List.generate(n + 1, (_) => List.filled(m + 1, 0));
     for (int i = 1; i <= n; i++) {
       for (int j = 1; j <= m; j++) {
-        if (correct[i-1] == answer[j-1]) dp[i][j] = dp[i-1][j-1] + 1;
+        if (normCorrect[i-1] == normAnswer[j-1]) dp[i][j] = dp[i-1][j-1] + 1;
         else dp[i][j] = dp[i-1][j] > dp[i][j-1] ? dp[i-1][j] : dp[i][j-1];
       }
     }
-    // 매칭 안 된 정답 단어 = 틀린 것
     final matched = <int>{};
     int i = n, j = m;
     while (i > 0 && j > 0) {
-      if (correct[i-1] == answer[j-1]) { matched.add(i-1); i--; j--; }
+      if (normCorrect[i-1] == normAnswer[j-1]) { matched.add(i-1); i--; j--; }
       else if (dp[i-1][j] > dp[i][j-1]) i--;
       else j--;
     }
