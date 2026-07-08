@@ -455,6 +455,12 @@ void _init() async {
     await _tts.setSpeechRate(speed);
     await _tts.setVolume(volume);
     await _tts.setPitch(pitch);
+    // Hive에 저장
+    final box = Hive.box('settings');
+    await box.put('tts_speed', speed);
+    await box.put('tts_volume', volume);
+    await box.put('tts_pitch', pitch);
+    await box.put('tts_pause', pauseMs);
   }
 }
 // ── TTS 컨트롤 바 ────────────────────────────────────────────────────
@@ -3403,7 +3409,9 @@ class _QuizScreenState extends State<QuizScreen> {
         autofocus: true,
         onKeyEvent: (event) {
           if (event is KeyDownEvent &&
-              event.logicalKey == LogicalKeyboardKey.space &&
+              event.logicalKey == LogicalKeyboardKey.shift ||
+              event.logicalKey == LogicalKeyboardKey.shiftLeft ||
+              event.logicalKey == LogicalKeyboardKey.shiftRight
               !_inputFocusNode.hasFocus) {
             _playCurrentTts();
           }
@@ -3440,7 +3448,7 @@ class _QuizScreenState extends State<QuizScreen> {
                       color: tts.playing ? Colors.white : kBlue, size: 36)))),
               const SizedBox(height: 6),
               Center(child: Text(
-                tts.playing ? '읽는 중... (Space로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Space)' : '눌러서 듣기'),
+                tts.playing ? '읽는 중... (Shift로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Shift)' : '눌러서 듣기'),
                 style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
 
               const SizedBox(height: 32),
@@ -3455,7 +3463,7 @@ class _QuizScreenState extends State<QuizScreen> {
                 textInputAction: TextInputAction.done,
                 onSubmitted: (_) => _submit(),
                 decoration: InputDecoration(
-                  hintText: '여기에 입력 후 엔터로 제출...',
+                  hintText: '답변 후 엔터...',
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                       borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
