@@ -13,6 +13,7 @@ void main() async {
   await Hive.openBox('reminders');
   await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
+  TtsController.instance._init(); // Hive 열린 후 설정 로드
   runApp(const SoggiApp());
 }
 
@@ -249,7 +250,14 @@ class StudyTimer extends ChangeNotifier {
 class TtsController extends ChangeNotifier {
   static final TtsController _instance = TtsController._();
   static TtsController get instance => _instance;
-  TtsController._() { _init(); }
+ TtsController._() { _initBasic(); }
+
+  void _initBasic() {
+    _tts.setLanguage('ko-KR');
+    _tts.setSpeechRate(speed);
+    _tts.setVolume(volume);
+    _tts.setPitch(pitch);
+  }
 
   final FlutterTts _tts = FlutterTts();
   bool _playing = false;
@@ -293,17 +301,17 @@ class TtsController extends ChangeNotifier {
   }
 
 void _init() async {
-    // 저장된 속도 불러오기
-    final box = Hive.box('settings');
-    speed  = (box.get('tts_speed',  defaultValue: 0.5) as num).toDouble();
-    volume = (box.get('tts_volume', defaultValue: 1.0) as num).toDouble();
-    pitch  = (box.get('tts_pitch',  defaultValue: 1.0) as num).toDouble();
-    pauseMs = (box.get('tts_pause', defaultValue: 250.0) as num).toDouble();
-
-    _tts.setLanguage('ko-KR');
-    _tts.setSpeechRate(speed);
-    _tts.setVolume(volume);
-    _tts.setPitch(pitch);
+    try {
+      final box = Hive.box('settings');
+      speed   = (box.get('tts_speed',   defaultValue: 0.5)   as num).toDouble();
+      volume  = (box.get('tts_volume',  defaultValue: 1.0)   as num).toDouble();
+      pitch   = (box.get('tts_pitch',   defaultValue: 1.0)   as num).toDouble();
+      pauseMs = (box.get('tts_pause',   defaultValue: 250.0) as num).toDouble();
+      await _tts.setSpeechRate(speed);
+      await _tts.setVolume(volume);
+      await _tts.setPitch(pitch);
+      notifyListeners();
+    } catch (_) {}
   }
   List<MapEntry<int, String>> _splitWithOffsets(String text) {
     final result = <MapEntry<int, String>>[];
