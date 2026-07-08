@@ -3408,11 +3408,10 @@ class _QuizScreenState extends State<QuizScreen> {
         focusNode: _keyboardFocusNode,
         autofocus: true,
         onKeyEvent: (event) {
-          if (event is KeyDownEvent &&
+          if (event is KeyDownEvent && (
               event.logicalKey == LogicalKeyboardKey.shift ||
               event.logicalKey == LogicalKeyboardKey.shiftLeft ||
-              event.logicalKey == LogicalKeyboardKey.shiftRight
-              !_inputFocusNode.hasFocus) {
+              event.logicalKey == LogicalKeyboardKey.shiftRight)) {
             _playCurrentTts();
           }
         },
