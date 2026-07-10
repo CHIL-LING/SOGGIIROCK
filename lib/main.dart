@@ -3312,6 +3312,36 @@ class _QuizScreenState extends State<QuizScreen> {
 
         // 모드 선택
         _lbl('테스트 유형'),
+        // TTS 속도
+        _lbl('TTS 속도'),
+        Row(children: [
+          Expanded(child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              activeTrackColor: kBlue, inactiveTrackColor: kBlueLight, thumbColor: kBlue),
+            child: Slider(
+              value: TtsController.instance.speed,
+              min: 0.1, max: 1.0, divisions: 9,
+              onChanged: (v) async {
+                TtsController.instance.speed = v;
+                await TtsController.instance.applySettings();
+                setState(() {});
+              }))),
+          Container(
+            width: 64, padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+            child: Text(() {
+              final v = TtsController.instance.speed;
+              if (v <= 0.2) return '매우 느림';
+              if (v <= 0.4) return '느림';
+              if (v <= 0.6) return '보통';
+              if (v <= 0.8) return '빠름';
+              return '매우 빠름';
+            }(), textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w700, color: kBlueDark, fontSize: 11))),
+        ]),
+        const SizedBox(height: 20),
         Row(children: [
           _ModeChip(label: '약어', value: 'abbr', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
           const SizedBox(width: 8),
