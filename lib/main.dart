@@ -3350,51 +3350,63 @@ class _QuizScreenState extends State<QuizScreen> {
 
         // 문제 수 설정
         _lbl('문제 수'),
+        // 문제 수 직접 입력 + +- 버튼
         Row(children: [
-          Expanded(child: Builder(builder: (context) {
-            final abbrevs = Store.getAbbreviations();
-            final sentences = Store.getSentences();
-            int maxCount = 0;
-            if (_mode == 'abbr') {
-              maxCount = _filterGroupId != null
-                  ? abbrevs.where((a) => a.groupId == _filterGroupId).length
-                  : abbrevs.length;
-            } else if (_mode == 'sentence') {
-              maxCount = sentences.length;
-            } else {
-              maxCount = abbrevs.length + sentences.length;
-            }
-            maxCount = maxCount.clamp(1, 9999);
-            if (_quizCount > maxCount) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) setState(() => _quizCount = maxCount);
-              });
-            }
-            return Slider(
-              value: _quizCount.toDouble().clamp(1, maxCount.toDouble()),
-              min: 1, max: maxCount.toDouble(),
-              divisions: (maxCount - 1).clamp(1, 9998),
-              activeColor: kBlue, inactiveColor: kBlueLight,
-              onChanged: (v) => setState(() => _quizCount = v.round()));
-          })),
-          // 숫자 직접 입력
-          SizedBox(width: 64, child: TextField(
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+          const SizedBox(width: 8),
+          SizedBox(width: 70, child: TextField(
             keyboardType: TextInputType.number,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
             decoration: InputDecoration(
               isDense: true,
               hintText: '$_quizCount',
-              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
               contentPadding: const EdgeInsets.symmetric(vertical: 8),
               filled: true, fillColor: kBlueLight,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
             onSubmitted: (v) {
               final n = int.tryParse(v);
               if (n != null && n > 0) setState(() => _quizCount = n);
-            },
-          )),
-       ]),
+            })),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+          const Spacer(),
+          Text('전체 중 $_quizCount개', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        ]),
+        const SizedBox(height: 20),
+
+        // TTS 속도 슬라이더
+        _lbl('TTS 속도'),
+        Row(children: [
+          Expanded(child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+              activeTrackColor: kBlue, inactiveTrackColor: kBlueLight, thumbColor: kBlue),
+            child: Slider(
+              value: TtsController.instance.speed,
+              min: 0.1, max: 1.0, divisions: 9,
+              onChanged: (v) async {
+                TtsController.instance.speed = v;
+                await TtsController.instance.applySettings();
+                setState(() {});
+              }))),
+          Container(
+            width: 64, padding: const EdgeInsets.symmetric(vertical: 6),
+            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+            child: Text(_speedLabel(TtsController.instance.speed),
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w700, color: kBlueDark, fontSize: 11))),
+        ]),
         const SizedBox(height: 32),
 
         // 시작 버튼
