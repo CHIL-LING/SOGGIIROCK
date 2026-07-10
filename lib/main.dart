@@ -13,6 +13,7 @@ void main() async {
   await Hive.openBox('reminders');
   await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
+  TtsController.instance._init(); // Hive 열린 후 설정 로드
   runApp(const SoggiApp());
 }
 
@@ -1363,8 +1364,7 @@ class _GraphScreenState extends State<GraphScreen> {
         leading:IconButton(icon:const Icon(Icons.arrow_back_ios_rounded,color:kBlue),onPressed:()=>Navigator.pop(context)),
         title:const Text('학습 그래프',style:TextStyle(fontWeight:FontWeight.w900,fontSize:18))),
       body: Padding(padding:const EdgeInsets.all(16),child:Column(children:[
-        Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          // 윗줄: 분류
+       Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(children: [
             _PB(label:'타수',value:'wpm',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
             _PB(label:'연설',value:'speech',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
@@ -1372,7 +1372,6 @@ class _GraphScreenState extends State<GraphScreen> {
             _PB(label:'시간',value:'time',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),
           ]),
           const SizedBox(height:8),
-          // 아랫줄: 기간
           Row(children: [
             _PB(label:'1주',value:'week',sel:_period,onTap:(v)=>setState(()=>_period=v)),const SizedBox(width:6),
             _PB(label:'1달',value:'month',sel:_period,onTap:(v)=>setState(()=>_period=v)),const SizedBox(width:6),
@@ -3135,6 +3134,14 @@ class _QuizScreenState extends State<QuizScreen> {
         : (q as SavedSentenceModel).text;
     await TtsController.instance.speak(text);
     setState(() => _ttsPlayed = true);
+  }
+
+  // 을/를, 와/과, 으로/므로 쌍 정규화
+  String _normalizeJosa(String word) {
+    if (word.endsWith('를')) return word.substring(0, word.length - 1) + '을';
+    if (word.endsWith('와')) return word.substring(0, word.length - 1) + '과';
+    if (word.endsWith('므로')) return word.substring(0, word.length - 2) + '으로';
+    return word;
   }
 
   // 을/를, 와/과, 으로/므로 쌍 정규화
