@@ -3144,14 +3144,6 @@ class _QuizScreenState extends State<QuizScreen> {
     return word;
   }
 
-  // 을/를, 와/과, 으로/므로 쌍 정규화
-  String _normalizeJosa(String word) {
-    if (word.endsWith('를')) return word.substring(0, word.length - 1) + '을';
-    if (word.endsWith('와')) return word.substring(0, word.length - 1) + '과';
-    if (word.endsWith('므로')) return word.substring(0, word.length - 2) + '으로';
-    return word;
-  }
-
   // diff 알고리즘: 빠진/틀린 단어만 찾기 (순서 밀림 방지)
   List<String> _findWrong(List<String> answer, List<String> correct) {
     final normAnswer = answer.map(_normalizeJosa).toList();
