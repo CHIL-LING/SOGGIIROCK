@@ -3429,7 +3429,7 @@ Widget _buildSetup() {
   }
 
   // ── 퀴즈 진행 화면 ──
-  Widget _buildQuiz() {
+Widget _buildQuiz() {
     final tts = TtsController.instance;
     final progress = (_currentIdx + 1) / _questions.length;
     return Scaffold(backgroundColor: Colors.white,
@@ -3445,7 +3445,6 @@ Widget _buildSetup() {
           }
         },
         child: Column(children: [
-          // 헤더
           Padding(padding: const EdgeInsets.fromLTRB(20, 16, 20, 0), child: Column(children: [
             Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
               Text('${_currentIdx + 1} / ${_questions.length}',
@@ -3457,13 +3456,10 @@ Widget _buildSetup() {
             LinearProgressIndicator(value: progress, backgroundColor: kBlueLight, color: kBlue,
                 borderRadius: BorderRadius.circular(4), minHeight: 6),
           ])),
-
           Expanded(child: SingleChildScrollView(
             padding: const EdgeInsets.all(20),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const SizedBox(height: 16),
-
-              // TTS 재생 버튼
               Center(child: GestureDetector(
                 onTap: _playCurrentTts,
                 child: Container(
@@ -3478,44 +3474,47 @@ Widget _buildSetup() {
               Center(child: Text(
                 tts.playing ? '읽는 중... (Shift로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Shift)' : '눌러서 듣기'),
                 style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
-
-              const SizedBox(height: 32),
+              const SizedBox(height: 16),
               // 속도 조절
-              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              Row(children: [
                 GestureDetector(
                   onTap: () async {
                     TtsController.instance.speed = (TtsController.instance.speed - 0.1).clamp(0.1, 1.0);
                     await TtsController.instance.applySettings();
                     setState(() {});
+                    _inputFocusNode.requestFocus();
                   },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Container(width: 36, height: 36,
                     decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                    child: const Text('느리게', style: TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700)))),
-                const SizedBox(width: 10),
-                Text(() {
-                  final v = TtsController.instance.speed;
-                  if (v <= 0.2) return '매우 느림';
-                  if (v <= 0.4) return '느림';
-                  if (v <= 0.6) return '보통';
-                  if (v <= 0.8) return '빠름';
-                  return '매우 빠름';
-                }(), style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
-                const SizedBox(width: 10),
+                    child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+                const SizedBox(width: 8),
+                Container(
+                  width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                  child: Text(() {
+                    final v = TtsController.instance.speed;
+                    if (v <= 0.2) return '매우 느림';
+                    if (v <= 0.4) return '느림';
+                    if (v <= 0.6) return '보통';
+                    if (v <= 0.8) return '빠름';
+                    return '매우 빠름';
+                  }(), textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
+                const SizedBox(width: 8),
                 GestureDetector(
                   onTap: () async {
                     TtsController.instance.speed = (TtsController.instance.speed + 0.1).clamp(0.1, 1.0);
                     await TtsController.instance.applySettings();
                     setState(() {});
+                    _inputFocusNode.requestFocus();
                   },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  child: Container(width: 36, height: 36,
                     decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                    child: const Text('빠르게', style: TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700)))),
+                    child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+                const SizedBox(width: 8),
+                const Text('속도', style: TextStyle(fontSize: 12, color: Colors.grey)),
               ]),
               const SizedBox(height: 20),
-
-              // 입력창
               _lbl('들은 내용을 입력하세요'),
               TextField(
                 controller: _answerCtrl,
@@ -3532,7 +3531,6 @@ Widget _buildSetup() {
                       borderSide: const BorderSide(color: kBlue))),
               ),
               const SizedBox(height: 16),
-
               SizedBox(width: double.infinity, child: ElevatedButton(
                 onPressed: _submit,
                 style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
@@ -3543,8 +3541,7 @@ Widget _buildSetup() {
             ]))),
         ]))));
   }
-
-  // ── 결과 화면 ──
+  
   Widget _buildResult() {
     final total = _results.length;
     final correct = _results.where((r) => r['correct'] as bool).length;
