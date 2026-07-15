@@ -3307,7 +3307,7 @@ Widget _buildSetup() {
     return Scaffold(backgroundColor: Colors.white,
       body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(
         crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('퀴즈 설정', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
+        const Text('테스트 설정', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 24),
 
         // TTS 속도
@@ -3427,7 +3427,7 @@ Widget _buildSetup() {
           child: const Text('테스트 시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)))),
       ]))));
   }
-  
+
   // ── 퀴즈 진행 화면 ──
   Widget _buildQuiz() {
     final tts = TtsController.instance;
@@ -3480,6 +3480,40 @@ Widget _buildSetup() {
                 style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
 
               const SizedBox(height: 32),
+              // 속도 조절
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                GestureDetector(
+                  onTap: () async {
+                    TtsController.instance.speed = (TtsController.instance.speed - 0.1).clamp(0.1, 1.0);
+                    await TtsController.instance.applySettings();
+                    setState(() {});
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                    child: const Text('느리게', style: TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700)))),
+                const SizedBox(width: 10),
+                Text(() {
+                  final v = TtsController.instance.speed;
+                  if (v <= 0.2) return '매우 느림';
+                  if (v <= 0.4) return '느림';
+                  if (v <= 0.6) return '보통';
+                  if (v <= 0.8) return '빠름';
+                  return '매우 빠름';
+                }(), style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
+                const SizedBox(width: 10),
+                GestureDetector(
+                  onTap: () async {
+                    TtsController.instance.speed = (TtsController.instance.speed + 0.1).clamp(0.1, 1.0);
+                    await TtsController.instance.applySettings();
+                    setState(() {});
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                    child: const Text('빠르게', style: TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700)))),
+              ]),
+              const SizedBox(height: 20),
 
               // 입력창
               _lbl('들은 내용을 입력하세요'),
