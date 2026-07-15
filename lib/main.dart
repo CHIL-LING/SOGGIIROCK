@@ -3302,7 +3302,7 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   // ── 설정 화면 ──
-  Widget _buildSetup() {
+Widget _buildSetup() {
     final groups = Store.getGroups();
     return Scaffold(backgroundColor: Colors.white,
       body: SafeArea(child: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(
@@ -3310,8 +3310,6 @@ class _QuizScreenState extends State<QuizScreen> {
         const Text('퀴즈 설정', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 24),
 
-        // 모드 선택
-        _lbl('테스트 유형'),
         // TTS 속도
         _lbl('TTS 속도'),
         Row(children: [
@@ -3342,6 +3340,9 @@ class _QuizScreenState extends State<QuizScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w700, color: kBlueDark, fontSize: 11))),
         ]),
         const SizedBox(height: 20),
+
+        // 모드 선택
+        _lbl('테스트 유형'),
         Row(children: [
           _ModeChip(label: '약어', value: 'abbr', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
           const SizedBox(width: 8),
@@ -3351,7 +3352,7 @@ class _QuizScreenState extends State<QuizScreen> {
         ]),
         const SizedBox(height: 20),
 
-        // 그룹 필터 (약어 모드일 때만)
+        // 그룹 필터
         if (_mode == 'abbr' && groups.isNotEmpty) ...[
           _lbl('그룹 필터'),
           Wrap(spacing: 8, runSpacing: 8, children: [
@@ -3383,65 +3384,50 @@ class _QuizScreenState extends State<QuizScreen> {
           const SizedBox(height: 20),
         ],
 
-        // 문제 수 설정
+        // 문제 수
         _lbl('문제 수'),
         Row(children: [
-          Expanded(child: Builder(builder: (context) {
-            final abbrevs = Store.getAbbreviations();
-            final sentences = Store.getSentences();
-            int maxCount = 0;
-            if (_mode == 'abbr') {
-              maxCount = _filterGroupId != null
-                  ? abbrevs.where((a) => a.groupId == _filterGroupId).length
-                  : abbrevs.length;
-            } else if (_mode == 'sentence') {
-              maxCount = sentences.length;
-            } else {
-              maxCount = abbrevs.length + sentences.length;
-            }
-            maxCount = maxCount.clamp(1, 9999);
-            if (_quizCount > maxCount) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (mounted) setState(() => _quizCount = maxCount);
-              });
-            }
-            return Slider(
-              value: _quizCount.toDouble().clamp(1, maxCount.toDouble()),
-              min: 1, max: maxCount.toDouble(),
-              divisions: (maxCount - 1).clamp(1, 9998),
-              activeColor: kBlue, inactiveColor: kBlueLight,
-              onChanged: (v) => setState(() => _quizCount = v.round()));
-          })),
-          // 숫자 직접 입력
-          SizedBox(width: 64, child: TextField(
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+          const SizedBox(width: 8),
+          SizedBox(width: 70, child: TextField(
             keyboardType: TextInputType.number,
             textAlign: TextAlign.center,
-            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
             decoration: InputDecoration(
               isDense: true,
               hintText: '$_quizCount',
-              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
               contentPadding: const EdgeInsets.symmetric(vertical: 8),
               filled: true, fillColor: kBlueLight,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
             onSubmitted: (v) {
               final n = int.tryParse(v);
               if (n != null && n > 0) setState(() => _quizCount = n);
-            },
-          )),
-       ]),
+            })),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+          const Spacer(),
+          Text('전체 중 $_quizCount개', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+        ]),
         const SizedBox(height: 32),
 
-        // 시작 버튼
         SizedBox(width: double.infinity, child: ElevatedButton(
           onPressed: _start,
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-          child: const Text('퀴즈 시작하기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)))),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
+          child: const Text('테스트 시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)))),
       ]))));
   }
-
+  
   // ── 퀴즈 진행 화면 ──
   Widget _buildQuiz() {
     final tts = TtsController.instance;
