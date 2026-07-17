@@ -3311,23 +3311,60 @@ Widget _buildSetup() {
         const SizedBox(height: 24),
 
         // TTS 속도
-        _lbl('TTS 속도'),
+// 문제 수 + TTS 속도
         Row(children: [
-          Expanded(child: SliderTheme(
-            data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-              activeTrackColor: kBlue, inactiveTrackColor: kBlueLight, thumbColor: kBlue),
-            child: Slider(
-              value: TtsController.instance.speed,
-              min: 0.1, max: 1.0, divisions: 9,
-              onChanged: (v) async {
-                TtsController.instance.speed = v;
+          _lbl('문제 수'),
+          const Spacer(),
+          _lbl('TTS 속도'),
+        ]),
+        Row(children: [
+          // 문제 수 버튼
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+          const SizedBox(width: 8),
+          SizedBox(width: 60, child: TextField(
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: '$_quizCount',
+              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+              contentPadding: const EdgeInsets.symmetric(vertical: 8),
+              filled: true, fillColor: kBlueLight,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
+            onSubmitted: (v) {
+              final n = int.tryParse(v);
+              if (n != null && n > 0) setState(() => _quizCount = n);
+            })),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+          const Spacer(),
+          // TTS 속도 버튼
+          GestureDetector(
+            onTap: () async {
+              final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+              final cur = TtsController.instance.speed;
+              final idx = speeds.indexWhere((s) => s >= cur);
+              if (idx > 0) {
+                TtsController.instance.speed = speeds[idx - 1];
                 await TtsController.instance.applySettings();
                 setState(() {});
-              }))),
+              }
+            },
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+          const SizedBox(width: 8),
           Container(
-            width: 64, padding: const EdgeInsets.symmetric(vertical: 6),
+            width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
             decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
             child: Text(() {
               final v = TtsController.instance.speed;
@@ -3337,10 +3374,24 @@ Widget _buildSetup() {
               if (v <= 0.8) return '빠름';
               return '매우 빠름';
             }(), textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.w700, color: kBlueDark, fontSize: 11))),
+                style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: () async {
+              final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+              final cur = TtsController.instance.speed;
+              final idx = speeds.lastIndexWhere((s) => s <= cur);
+              if (idx < speeds.length - 1) {
+                TtsController.instance.speed = speeds[idx + 1];
+                await TtsController.instance.applySettings();
+                setState(() {});
+              }
+            },
+            child: Container(width: 36, height: 36,
+              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
         ]),
-        const SizedBox(height: 20),
-
+        const SizedBox(height: 32),
         // 모드 선택
         _lbl('테스트 유형'),
         Row(children: [
