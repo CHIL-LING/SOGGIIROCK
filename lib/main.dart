@@ -3435,40 +3435,6 @@ Widget _buildSetup() {
           const SizedBox(height: 20),
         ],
 
-        // 문제 수
-        _lbl('문제 수'),
-        Row(children: [
-          GestureDetector(
-            onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
-          const SizedBox(width: 8),
-          SizedBox(width: 70, child: TextField(
-            keyboardType: TextInputType.number,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: '$_quizCount',
-              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 18),
-              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-              filled: true, fillColor: kBlueLight,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
-            onSubmitted: (v) {
-              final n = int.tryParse(v);
-              if (n != null && n > 0) setState(() => _quizCount = n);
-            })),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
-          const Spacer(),
-          Text('전체 중 $_quizCount개', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-        ]),
-        const SizedBox(height: 32),
 
         SizedBox(width: double.infinity, child: ElevatedButton(
           onPressed: _start,
