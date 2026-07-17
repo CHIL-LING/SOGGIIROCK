@@ -830,8 +830,9 @@ class _SplashScreenState extends State<SplashScreen> {
       const SizedBox(height: 12),
       const Text('속끼록', style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: Colors.white, letterSpacing: 2)),
       const SizedBox(height: 6),
-      Text('약어 학습 · 기록 · 복습', style: TextStyle(fontSize: 14, color: Colors.white.withOpacity(0.75))),
-      const SizedBox(height: 40),
+Text('약어 학습 · 기록 · 복습', style: TextStyle(fontSize: 14, color: Colors.white.withOpacity(0.75))),
+      const SizedBox(height: 4),
+      Text('🤘기록도 ROCK이다.🤘', style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.55))),      const SizedBox(height: 40),
       SizedBox(width: 40, child: LinearProgressIndicator(
           backgroundColor: Colors.white.withOpacity(0.3), color: Colors.white,
           borderRadius: BorderRadius.circular(4))),
@@ -3136,11 +3137,14 @@ class _QuizScreenState extends State<QuizScreen> {
     setState(() => _ttsPlayed = true);
   }
 
-  // 을/를, 와/과, 으로/므로 쌍 정규화
+// 을/를, 와/과, 으로/므로 쌍 정규화 (양방향)
   String _normalizeJosa(String word) {
-    if (word.endsWith('를')) return word.substring(0, word.length - 1) + '을';
-    if (word.endsWith('와')) return word.substring(0, word.length - 1) + '과';
-    if (word.endsWith('므로')) return word.substring(0, word.length - 2) + '으로';
+    if (word.endsWith('를') || word.endsWith('을')) 
+      return word.substring(0, word.length - 1) + '을';
+    if (word.endsWith('와') || word.endsWith('과')) 
+      return word.substring(0, word.length - 1) + '과';
+    if (word.endsWith('므로') || word.endsWith('으로')) 
+      return word.substring(0, word.length - 2) + '으로';
     return word;
   }
 
