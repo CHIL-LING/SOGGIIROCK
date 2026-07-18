@@ -3137,17 +3137,18 @@ class _QuizScreenState extends State<QuizScreen> {
     setState(() => _ttsPlayed = true);
   }
 
-// 을/를, 와/과, 으로/므로 쌍 정규화 (양방향)
+// 을/를, 와/과, 으로/므로 쌍 정규화 + 마침표 제거
   String _normalizeJosa(String word) {
-    if (word.endsWith('를') || word.endsWith('을')) 
-      return word.substring(0, word.length - 1) + '을';
-    if (word.endsWith('와') || word.endsWith('과')) 
-      return word.substring(0, word.length - 1) + '과';
-    if (word.endsWith('므로') || word.endsWith('으로')) 
-      return word.substring(0, word.length - 2) + '으로';
-    return word;
+    String w = word.replaceAll('.', '').replaceAll('。', '');
+    if (w.endsWith('를') || w.endsWith('을'))
+      return w.substring(0, w.length - 1) + '을';
+    if (w.endsWith('와') || w.endsWith('과'))
+      return w.substring(0, w.length - 1) + '과';
+    if (w.endsWith('므로') || w.endsWith('으로'))
+      return w.substring(0, w.length - 2) + '으로';
+    return w;
   }
-
+  
   // diff 알고리즘: 빠진/틀린 단어만 찾기 (순서 밀림 방지)
   List<String> _findWrong(List<String> answer, List<String> correct) {
     final normAnswer = answer.map(_normalizeJosa).toList();
