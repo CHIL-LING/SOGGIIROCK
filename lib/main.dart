@@ -49,25 +49,23 @@ class AbbreviationModel {
   final String id, word;
   final List<String> initial, medial, final_;
   final bool isComposite, isConcurrent, isAttached, isFavorite;
-  final String? groupId;
-
+  final List<String> groupIds;
   AbbreviationModel({
     required this.id, required this.word,
     this.initial = const [], this.medial = const [], this.final_ = const [],
     this.isComposite = false, this.isConcurrent = false,
     this.isAttached = false, this.isFavorite = false,
-    this.groupId,
+    this.groupIds = const [],
   });
-
+  
   String get searchKey => decodeWordForSearch(word);
   String get displayWord => word;
 
-  Map<String, dynamic> toMap() => {
+Map<String, dynamic> toMap() => {
     'id': id, 'word': word, 'initial': initial, 'medial': medial, 'final_': final_,
     'isComposite': isComposite, 'isConcurrent': isConcurrent,
-    'isAttached': isAttached, 'isFavorite': isFavorite, 'groupId': groupId,
+    'isAttached': isAttached, 'isFavorite': isFavorite, 'groupIds': groupIds,
   };
-
   factory AbbreviationModel.fromMap(Map m) => AbbreviationModel(
     id: m['id'] as String, word: m['word'] as String,
     initial: List<String>.from(m['initial'] ?? []),
@@ -77,19 +75,20 @@ class AbbreviationModel {
     isConcurrent: m['isConcurrent'] as bool? ?? false,
     isAttached: m['isAttached'] as bool? ?? false,
     isFavorite: m['isFavorite'] as bool? ?? false,
-    groupId: m['groupId'] as String?,
+    groupIds: m['groupIds'] != null
+        ? List<String>.from(m['groupIds'])
+        : (m['groupId'] != null ? [m['groupId'] as String] : []),
   );
-
   AbbreviationModel copyWith({
     String? word, List<String>? initial, List<String>? medial, List<String>? final_,
     bool? isComposite, bool? isConcurrent, bool? isAttached, bool? isFavorite,
-    String? groupId, bool clearGroup = false,
+    List<String>? groupIds,
   }) => AbbreviationModel(
     id: id, word: word ?? this.word, initial: initial ?? this.initial,
     medial: medial ?? this.medial, final_: final_ ?? this.final_,
     isComposite: isComposite ?? this.isComposite, isConcurrent: isConcurrent ?? this.isConcurrent,
     isAttached: isAttached ?? this.isAttached, isFavorite: isFavorite ?? this.isFavorite,
-    groupId: clearGroup ? null : (groupId ?? this.groupId),
+    groupIds: groupIds ?? this.groupIds,
   );
 
   String get strokeDisplay {
@@ -1448,8 +1447,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
     _tooltipOverlay?.remove(); _tooltipOverlay = null;
     final screenW = MediaQuery.of(context).size.width;
     final overlay = Overlay.of(context);
-    final group = abbr.groupId != null ? Store.findGroup(abbr.groupId!) : null;
-    _tooltipOverlay = OverlayEntry(builder: (_) => Stack(children: [
+final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<GroupModel>().toList();    _tooltipOverlay = OverlayEntry(builder: (_) => Stack(children: [
       Positioned.fill(child: GestureDetector(onTap: _closeTooltip, behavior: HitTestBehavior.translucent,
           child: const SizedBox.expand())),
       Positioned(
@@ -1472,10 +1470,10 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                   decoration: BoxDecoration(color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(4)),
                   child: Text(l, style: TextStyle(fontSize: 9, color: c, fontWeight: FontWeight.w700)));
               }),
-              if (group != null) Container(margin: const EdgeInsets.only(left: 3),
+              ...abbrGroups.map((group) => Container(margin: const EdgeInsets.only(left: 3),
                 padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                 decoration: BoxDecoration(color: group.color.withOpacity(0.15), borderRadius: BorderRadius.circular(4)),
-                child: Text(group.name, style: TextStyle(fontSize: 9, color: group.color, fontWeight: FontWeight.w700))),
+                child: Text(group.name, style: TextStyle(fontSize: 9, color: group.color, fontWeight: FontWeight.w700)))),
             ]),
             if (abbr.strokeDisplay.isNotEmpty) ...[
               const SizedBox(height: 3),
@@ -1636,7 +1634,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                         itemBuilder: (ctx, i) {
                           final a = found[i];
                           final isSelected = _gridSelected.contains(a.id);
-                          final group = a.groupId != null ? Store.findGroup(a.groupId!) : null;
+                          final aGroups = a.groupIds.map((id) => Store.findGroup(id)).whereType<GroupModel>().toList();
                           return GestureDetector(
                             onTap: _gridSelectMode ? () => _toggleGridSelect(a.id) : null,
                             child: Container(
@@ -1665,9 +1663,9 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                                       decoration: BoxDecoration(color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
                                       child: Text(l, style: TextStyle(fontSize: 8, color: c, fontWeight: FontWeight.w700)));
                                   }),
-                                  if (group != null) Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                                  ...aGroups.map((group) => Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
                                     decoration: BoxDecoration(color: group.color.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
-                                    child: Text(group.name, style: TextStyle(fontSize: 8, color: group.color, fontWeight: FontWeight.w700))),
+                                    child: Text(group.name, style: TextStyle(fontSize: 8, color: group.color, fontWeight: FontWeight.w700)))),
                                 ]),
                                 if (a.strokeDisplay.isNotEmpty)
                                   Text(a.strokeDisplay, style: const TextStyle(fontSize: 9, color: Colors.grey),
@@ -1829,22 +1827,29 @@ class _SearchScreenState extends State<SearchScreen> {
         const SnackBar(content: Text('먼저 그룹을 만들어 주세요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
       return;
     }
-    final gid = await showDialog<String?>(context: context, builder: (ctx) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('그룹 지정', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: Column(mainAxisSize: MainAxisSize.min, children: [
-        ...groups.map((g) => ListTile(
-          leading: CircleAvatar(backgroundColor: g.color, radius: 10),
-          title: Text(g.name),
-          onTap: () => Navigator.pop(ctx, g.id))),
-        ListTile(
-          leading: const CircleAvatar(backgroundColor: Colors.grey, radius: 10),
-          title: const Text('그룹 해제'),
-          onTap: () => Navigator.pop(ctx, '')),
-      ])));
-    if (gid == null) return;
-    for (final a in all.where((a) => _selected.contains(a.id)))
-      await Store.saveAbbreviation(gid.isEmpty ? a.copyWith(clearGroup: true) : a.copyWith(groupId: gid));
+    final Set<String> checked = {};
+    final apply = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('그룹 추가 (중복 가능)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ...groups.map((g) => CheckboxListTile(
+            value: checked.contains(g.id),
+            activeColor: g.color,
+            secondary: CircleAvatar(backgroundColor: g.color, radius: 10),
+            title: Text(g.name),
+            onChanged: (v) => setS(() { if (v == true) checked.add(g.id); else checked.remove(g.id); }))),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true), child: const Text('추가')),
+        ])));
+    if (apply != true || checked.isEmpty) return;
+    for (final a in all.where((a) => _selected.contains(a.id))) {
+      final newIds = {...a.groupIds, ...checked}.toList();
+      await Store.saveAbbreviation(a.copyWith(groupIds: newIds));
+    }
     setState(() { _selected.clear(); _selectMode = false; });
   }
 
@@ -1894,7 +1899,7 @@ class _SearchScreenState extends State<SearchScreen> {
             final groups = Store.getGroups();
             var results = q.isEmpty ? all : sortedSearchResults(all, q);
             if (_showFavOnly) results = results.where((a) => a.isFavorite).toList();
-            if (_filterGroupId != null) results = results.where((a) => a.groupId == _filterGroupId).toList();
+            if (_filterGroupId != null) results = results.where((a) => a.groupIds.contains(_filterGroupId)).toList();
 
             return Scaffold(backgroundColor: Colors.white,
               body: SafeArea(child: Column(children: [
@@ -2116,7 +2121,7 @@ class _SelectedAbbrViewState extends State<_SelectedAbbrView> {
 void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
   final List<Map<String, TextEditingController>> rows = [];
   final List<Map<String, bool>> rowFlags = [];
-  final List<String?> rowGroupIds = [];
+  final List<List<String>> rowGroupIds = [];
   void addRow({AbbreviationModel? from}) {
     rows.add({
       'word':    TextEditingController(text: from?.word.replaceAll('*', ' ') ?? ''),
@@ -2130,7 +2135,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
       'isAttached': from?.isAttached ?? false,
       'isFavorite': from?.isFavorite ?? false,
     });
-    rowGroupIds.add(from?.groupId);
+    rowGroupIds.add(from?.groupIds != null ? List<String>.from(from!.groupIds) : <String>[]);
   }
   addRow(from: existing);
 
@@ -2189,7 +2194,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
             isConcurrent: rowFlags[i]['isConcurrent']!,
             isAttached: rowFlags[i]['isAttached']!,
             isFavorite: rowFlags[i]['isFavorite']!,
-            groupId: rowGroupIds[i]));
+            groupIds: rowGroupIds[i]));
         }
       }
 
@@ -2209,29 +2214,35 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
           onConcurrentChanged: (v) => setS(() => rowFlags[i]['isConcurrent'] = v),
           onAttachedChanged: (v) => setS(() => rowFlags[i]['isAttached'] = v),
           onFavoriteChanged: (v) => setS(() => rowFlags[i]['isFavorite'] = v)),
-        if (groups.isNotEmpty) ...[
+       if (groups.isNotEmpty) ...[
           const SizedBox(height: 6),
+          Row(children: [
+            Text('여러 그룹 선택 가능', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+            const Spacer(),
+            if (rowGroupIds[i].isNotEmpty)
+              GestureDetector(onTap: () => setS(() => rowGroupIds[i] = []),
+                child: Text('전체 해제', style: TextStyle(fontSize: 10, color: Colors.grey.shade500, decoration: TextDecoration.underline))),
+          ]),
+          const SizedBox(height: 4),
           Wrap(spacing: 6, runSpacing: 6, children: [
-            GestureDetector(onTap: () => setS(() => rowGroupIds[i] = null),
-              child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: rowGroupIds[i] == null ? Colors.grey.withOpacity(0.15) : const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: rowGroupIds[i] == null ? Colors.grey : Colors.transparent, width: 1.5)),
-                child: Text('없음', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                    color: rowGroupIds[i] == null ? Colors.grey.shade700 : Colors.grey)))),
-            ...groups.map((g) => GestureDetector(onTap: () => setS(() => rowGroupIds[i] = g.id),
-              child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: rowGroupIds[i] == g.id ? g.color.withOpacity(0.15) : const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: rowGroupIds[i] == g.id ? g.color : Colors.transparent, width: 1.5)),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  CircleAvatar(backgroundColor: g.color, radius: 5),
-                  const SizedBox(width: 5),
-                  Text(g.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                      color: rowGroupIds[i] == g.id ? g.color : Colors.grey)),
-                ])))),
+            ...groups.map((g) {
+              final selected = rowGroupIds[i].contains(g.id);
+              return GestureDetector(onTap: () => setS(() {
+                if (selected) rowGroupIds[i].remove(g.id); else rowGroupIds[i].add(g.id);
+              }),
+                child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: selected ? g.color.withOpacity(0.15) : const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: selected ? g.color : Colors.transparent, width: 1.5)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    if (selected) ...[Icon(Icons.check, size: 12, color: g.color), const SizedBox(width: 3)],
+                    CircleAvatar(backgroundColor: g.color, radius: 5),
+                    const SizedBox(width: 5),
+                    Text(g.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                        color: selected ? g.color : Colors.grey)),
+                  ])));
+            }),
           ]),
         ],
       ]);
@@ -2326,7 +2337,7 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
             : ListView.builder(padding: const EdgeInsets.all(16), itemCount: groups.length,
                 itemBuilder: (ctx, i) {
                   final g = groups[i];
-                  final count = Store.getAbbreviations().where((a) => a.groupId == g.id).length;
+                  final count = Store.getAbbreviations().where((a) => a.groupIds.contains(g.id)).length;
                   return Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: const Color(0xFFEEF0F8))),
@@ -2391,8 +2402,8 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
           onPressed: () async {
             await Store.deleteGroup(g.id);
-            for (final a in Store.getAbbreviations().where((a) => a.groupId == g.id))
-              await Store.saveAbbreviation(a.copyWith(clearGroup: true));
+            for (final a in Store.getAbbreviations().where((a) => a.groupIds.contains(g.id)))
+              await Store.saveAbbreviation(a.copyWith(groupIds: a.groupIds.where((id) => id != g.id).toList()));
             if (ctx.mounted) Navigator.pop(ctx);
           }, child: const Text('삭제')),
       ]));
@@ -2405,8 +2416,7 @@ class _AbbrContent extends StatelessWidget {
   const _AbbrContent({required this.abbr, required this.groups});
   @override
   Widget build(BuildContext context) {
-    final group = abbr.groupId != null ? groups.where((g) => g.id == abbr.groupId).firstOrNull : null;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+final abbrGroups = groups.where((g) => abbr.groupIds.contains(g.id)).toList();    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         if (abbr.isAttached) const Text('↙ ', style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
         Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
@@ -2419,12 +2429,12 @@ class _AbbrContent extends StatelessWidget {
             decoration: BoxDecoration(color: bgColor, borderRadius: BorderRadius.circular(8)),
             child: Text(label, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.w700)));
         }),
-        if (group != null) Container(margin: const EdgeInsets.only(left: 4),
+...abbrGroups.map((group) => Container(margin: const EdgeInsets.only(left: 4),
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
           decoration: BoxDecoration(color: group.color.withOpacity(0.15), borderRadius: BorderRadius.circular(8)),
-          child: Text(group.name, style: TextStyle(fontSize: 10, color: group.color, fontWeight: FontWeight.w700))),
+          child: Text(group.name, style: TextStyle(fontSize: 10, color: group.color, fontWeight: FontWeight.w700)))),
       ]),
-      const SizedBox(height: 4),
+            const SizedBox(height: 4),
       SelectableText(abbr.strokeDisplay, style: const TextStyle(fontSize: 12, color: Colors.grey)),
     ]);
   }
@@ -3094,7 +3104,7 @@ class _QuizScreenState extends State<QuizScreen> {
     if (_mode == 'abbr' || _mode == 'both') {
       var filtered = abbrevs;
       if (_filterGroupId != null) {
-        filtered = abbrevs.where((a) => a.groupId == _filterGroupId).toList();
+        filtered = abbrevs.where((a) => a.groupIds.contains(_filterGroupId)).toList();
       }
       pool.addAll(filtered);
     }
@@ -3148,7 +3158,7 @@ class _QuizScreenState extends State<QuizScreen> {
       return w.substring(0, w.length - 2) + '으로';
     return w;
   }
-  
+
   // diff 알고리즘: 빠진/틀린 단어만 찾기 (순서 밀림 방지)
   List<String> _findWrong(List<String> answer, List<String> correct) {
     final normAnswer = answer.map(_normalizeJosa).toList();
@@ -3270,7 +3280,7 @@ class _QuizScreenState extends State<QuizScreen> {
             await Store.saveGroup(GroupModel(id: gid, name: name, colorValue: selectedColor.value));
             for (final item in wrongItems) {
               if (item is AbbreviationModel) {
-                await Store.saveAbbreviation(item.copyWith(groupId: gid));
+                await Store.saveAbbreviation(item.copyWith(groupIds: {...item.groupIds, gid}.toList()));
               }
             }
             if (ctx.mounted) Navigator.pop(ctx);
