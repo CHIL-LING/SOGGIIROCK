@@ -2773,15 +2773,9 @@ class _RemindersScreenState extends State<RemindersScreen> {
             ]))),
         const SizedBox(height: 12),
         _lbl('간격'),
-        Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(onTap: () => setS(() => interval = d),
-          child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-            decoration: BoxDecoration(color: interval == d ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
-            child: Text('$d일', style: TextStyle(color: interval == d ? Colors.white : kBlue, fontWeight: FontWeight.w700))))).toList()),
-        const SizedBox(height: 10),
-        Row(children: [
-          Checkbox(value: repeat, activeColor: kBlue, onChanged: (v) => setS(() => repeat = v ?? false)),
-          const Text('반복'),
-        ]),
+        _IntervalRepeatPicker(interval: interval, repeat: repeat,
+          onIntervalChanged: (v) => setS(() => interval = v),
+          onRepeatChanged: (v) => setS(() => repeat = v)),
       ])),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
@@ -2957,15 +2951,9 @@ class _RemindersScreenState extends State<RemindersScreen> {
           if (useCustom) TextField(controller: customCtrl, decoration: _inputDeco('내용을 입력하세요')),
           const SizedBox(height: 12),
           _lbl('간격'),
-          Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(onTap: () => setS(() => interval = d),
-            child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              decoration: BoxDecoration(color: interval == d ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
-              child: Text('$d일', style: TextStyle(color: interval == d ? Colors.white : kBlue, fontWeight: FontWeight.w700))))).toList()),
-          const SizedBox(height: 10),
-          Row(children: [
-            Checkbox(value: repeat, activeColor: kBlue, onChanged: (v) => setS(() => repeat = v ?? false)),
-            const Text('반복'),
-          ]),
+          _IntervalRepeatPicker(interval: interval, repeat: repeat,
+            onIntervalChanged: (v) => setS(() => interval = v),
+            onRepeatChanged: (v) => setS(() => repeat = v)),
         ])),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
@@ -2996,6 +2984,29 @@ class _RemindersScreenState extends State<RemindersScreen> {
   }
 }
 
+// 리마인드 간격/반복 선택 UI (단일/일괄 설정 다이얼로그에서 공용으로 사용)
+class _IntervalRepeatPicker extends StatelessWidget {
+  final int interval;
+  final bool repeat;
+  final ValueChanged<int> onIntervalChanged;
+  final ValueChanged<bool> onRepeatChanged;
+  const _IntervalRepeatPicker({
+    required this.interval, required this.repeat,
+    required this.onIntervalChanged, required this.onRepeatChanged});
+  @override
+  Widget build(BuildContext context) => Column(mainAxisSize: MainAxisSize.min, children: [
+    Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(onTap: () => onIntervalChanged(d),
+      child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        decoration: BoxDecoration(color: interval == d ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
+        child: Text('$d일', style: TextStyle(color: interval == d ? Colors.white : kBlue, fontWeight: FontWeight.w700))))).toList()),
+    const SizedBox(height: 10),
+    Row(children: [
+      Checkbox(value: repeat, activeColor: kBlue, onChanged: (v) => onRepeatChanged(v ?? false)),
+      const Text('반복'),
+    ]),
+  ]);
+}
+
 void _showReminderDialog(BuildContext context, String target, String type) {
   final existing = Store.findReminder(target);
   int interval = existing?.intervalDays ?? 1;
@@ -3004,17 +3015,9 @@ void _showReminderDialog(BuildContext context, String target, String type) {
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: Text(existing != null ? '리마인드 수정' : '리마인드 설정',
         style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-    content: Column(mainAxisSize: MainAxisSize.min, children: [
-      Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(onTap: () => setS(() => interval = d),
-        child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          decoration: BoxDecoration(color: interval == d ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
-          child: Text('$d일', style: TextStyle(color: interval == d ? Colors.white : kBlue, fontWeight: FontWeight.w700))))).toList()),
-      const SizedBox(height: 12),
-      Row(children: [
-        Checkbox(value: repeat, activeColor: kBlue, onChanged: (v) => setS(() => repeat = v ?? false)),
-        const Text('반복'),
-      ]),
-    ]),
+    content: _IntervalRepeatPicker(interval: interval, repeat: repeat,
+      onIntervalChanged: (v) => setS(() => interval = v),
+      onRepeatChanged: (v) => setS(() => repeat = v)),
     actions: [
       TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
       ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -3034,17 +3037,9 @@ void _showBulkReminderDialog(BuildContext context, List<String> targets, String 
   showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: Text('리마인드 설정 (${targets.length}개)', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-    content: Column(mainAxisSize: MainAxisSize.min, children: [
-      Wrap(spacing: 8, children: [1, 3, 7].map((d) => GestureDetector(onTap: () => setS(() => interval = d),
-        child: Container(padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-          decoration: BoxDecoration(color: interval == d ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
-          child: Text('$d일', style: TextStyle(color: interval == d ? Colors.white : kBlue, fontWeight: FontWeight.w700))))).toList()),
-      const SizedBox(height: 12),
-      Row(children: [
-        Checkbox(value: repeat, activeColor: kBlue, onChanged: (v) => setS(() => repeat = v ?? false)),
-        const Text('반복'),
-      ]),
-    ]),
+    content: _IntervalRepeatPicker(interval: interval, repeat: repeat,
+      onIntervalChanged: (v) => setS(() => interval = v),
+      onRepeatChanged: (v) => setS(() => repeat = v)),
     actions: [
       TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
       ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
