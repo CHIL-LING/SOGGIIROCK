@@ -3376,7 +3376,7 @@ class _QuizScreenState extends State<QuizScreen> {
         .whereType<AbbreviationModel>()
         .map((a) => a.displayWord.replaceAll('*', ' '))
         .join(', ');
-    final prompt = '다음 약어들을 모두 포함한 자연스러운 한국어 문장을 만들어줘: $words';
+    final prompt = '다음 약어들을 포함한 자연스러운 한국어 문장을 공백 제외 30자 내외로 각 단어마다 5개씩 만들어줘: $words';
     Clipboard.setData(ClipboardData(text: prompt));
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('AI 문장 생성 프롬프트가 복사됐어요'), backgroundColor: kBlue,
