@@ -13,6 +13,7 @@ void main() async {
   await Hive.openBox('reminders');
   await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
+  await Hive.openBox('quizWrongLog'); // 테스트 오답 기록(역대 통계용)
   TtsController.instance._init(); // Hive 열린 후 설정 로드
   runApp(const SoggiApp());
 }
@@ -203,6 +204,24 @@ class Store {
   }
   static ReminderModel? findReminder(String target) {
     try { return getReminders().firstWhere((r) => r.target == target); } catch (_) { return null; }
+  }
+
+  static Box get _qw => Hive.box('quizWrongLog');
+  // 테스트에서 틀렸을 때 항목 전체 텍스트를 기록 (역대 오답 통계용)
+  static Future<void> logQuizWrong(String text) =>
+      _qw.add({'text': text, 'ts': DateTime.now().toIso8601String()});
+  // 최근 N일간 틀린 횟수를 항목(전체 텍스트) 단위로 집계
+  static Map<String, int> getRecentWrongCounts({int days = 7}) {
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final counts = <String, int>{};
+    for (final e in _qw.values) {
+      final m = Map.from(e as Map);
+      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+      if (ts == null || ts.isBefore(cutoff)) continue;
+      final text = m['text'] as String;
+      counts[text] = (counts[text] ?? 0) + 1;
+    }
+    return counts;
   }
 }
 
@@ -1038,6 +1057,30 @@ InputDecoration _inputDeco(String? hint) => InputDecoration(
 extension ListExt<T> on List<T> {
   T? get firstOrNull => isEmpty ? null : first;
   T? elementAtOrNull(int index) => (index >= 0 && index < length) ? this[index] : null;
+}
+
+// 확인 다이얼로그에서 엔터(Enter)로 바로 확정할 수 있게 해주는 래퍼
+class _EnterToConfirm extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onConfirm;
+  const _EnterToConfirm({required this.child, required this.onConfirm});
+  @override State<_EnterToConfirm> createState() => _EnterToConfirmState();
+}
+class _EnterToConfirmState extends State<_EnterToConfirm> {
+  final _focusNode = FocusNode();
+  @override void dispose() { _focusNode.dispose(); super.dispose(); }
+  @override
+  Widget build(BuildContext context) => KeyboardListener(
+    focusNode: _focusNode,
+    autofocus: true,
+    onKeyEvent: (event) {
+      if (event is KeyDownEvent &&
+          (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+        widget.onConfirm();
+      }
+    },
+    child: widget.child,
+  );
 }
 
 class HomeScreen extends StatefulWidget {
@@ -1991,7 +2034,7 @@ class _SearchScreenState extends State<SearchScreen> {
                     ])),
                 Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: TextField(
                   controller: _ctrl, onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(hintText: '단어로 검색하세요...',
+                  decoration: InputDecoration(hintText: '약어로 검색하세요...',
                     prefixIcon: const Icon(Icons.search, color: Colors.grey),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue))))),
@@ -2122,6 +2165,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
   final List<Map<String, TextEditingController>> rows = [];
   final List<Map<String, bool>> rowFlags = [];
   final List<List<String>> rowGroupIds = [];
+  final List<FocusNode> wordFocusNodes = [];
   void addRow({AbbreviationModel? from}) {
     rows.add({
       'word':    TextEditingController(text: from?.word.replaceAll('*', ' ') ?? ''),
@@ -2136,6 +2180,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
       'isFavorite': from?.isFavorite ?? false,
     });
     rowGroupIds.add(from?.groupIds != null ? List<String>.from(from!.groupIds) : <String>[]);
+    wordFocusNodes.add(FocusNode());
   }
   addRow(from: existing);
 
@@ -2160,8 +2205,9 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         if (dupWords.isNotEmpty) {
           final proceedAnyway = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: const Text('이미 등록된 단어', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            content: Text('다음 단어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?'),
+            title: const Text('이미 등록된 약어', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            content: _EnterToConfirm(onConfirm: () => Navigator.pop(c, true),
+              child: Text('다음 약어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?')),
             actions: [
               TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -2173,7 +2219,8 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Text(existing != null ? '수정 확인' : '저장 확인',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          content: Text(existing != null ? '수정할까요?' : '${rows.length}개를 저장할까요?'),
+          content: _EnterToConfirm(onConfirm: () => Navigator.pop(c, true),
+            child: Text(existing != null ? '수정할까요?' : '${rows.length}개를 저장할까요?')),
           actions: [
             TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
             ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -2271,14 +2318,35 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
               if (rows.length > 1) Row(children: [
                 Text('${i + 1}번', style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
                 const Spacer(),
-                GestureDetector(onTap: () => setS(() { rows.removeAt(i); rowFlags.removeAt(i); rowGroupIds.removeAt(i); }),
+                GestureDetector(onTap: () => setS(() {
+                    rows.removeAt(i); rowFlags.removeAt(i); rowGroupIds.removeAt(i);
+                    wordFocusNodes.removeAt(i).dispose();
+                  }),
                   child: const Icon(Icons.remove_circle_outline, size: 16, color: Colors.red)),
               ]),
               if (rows.length > 1) const SizedBox(height: 4),
-              _lbl('단어'),
-              TextField(controller: row['word'], decoration: _inputDeco(''), textInputAction: TextInputAction.next),
+              _lbl('약어'),
+              Focus(
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent &&
+                      event.logicalKey == LogicalKeyboardKey.tab &&
+                      HardwareKeyboard.instance.isAltPressed) {
+                    if (existing == null && i == rows.length - 1) {
+                      setS(() => addRow());
+                    }
+                    final targetIndex = i + 1;
+                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                      if (targetIndex < wordFocusNodes.length) wordFocusNodes[targetIndex].requestFocus();
+                    });
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: TextField(controller: row['word'], focusNode: wordFocusNodes[i],
+                  decoration: _inputDeco(''), textInputAction: TextInputAction.next),
+              ),
               const SizedBox(height: 4),
-              Text('※ 띄어쓰기 → * 자동 변환', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+              Text('※ 띄어쓰기 → * 자동 변환  |  약어 입력 후 Alt+Tab → 초중종성 생략하고 다음 약어로', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2542,6 +2610,19 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
     setState(() { _selected.clear(); _selectMode = false; });
   }
 
+  void _bulkCopy(List<SavedSentenceModel> all) {
+    final text = all.where((s) => _selected.contains(s.id)).map((s) => s.text).join('\n');
+    Clipboard.setData(ClipboardData(text: text));
+    setState(() { _selected.clear(); _selectMode = false; });
+  }
+
+  void _bulkCopyForAI(List<SavedSentenceModel> all) {
+    final sentences = all.where((s) => _selected.contains(s.id)).map((s) => s.text).join('\n');
+    final prompt = '다음 문장들과 비슷한 스타일로 자연스러운 한국어 문장을 만들어줘:\n$sentences';
+    Clipboard.setData(ClipboardData(text: prompt));
+    setState(() { _selected.clear(); _selectMode = false; });
+  }
+
   void _editSelected(BuildContext context, List<SavedSentenceModel> all) {
     if (_selected.length != 1) return;
     final s = all.firstWhere((s) => _selected.contains(s.id));
@@ -2566,19 +2647,20 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
   void _save(BuildContext context) {
     final text = _ctrl.text.trim();
     if (text.isEmpty) return;
+    Future<void> doSave(BuildContext ctx) async {
+      await Store.saveSentence(SavedSentenceModel(
+        id: DateTime.now().millisecondsSinceEpoch.toString(), text: text,
+        createdAt: DateTime.now().toString().substring(0, 10)));
+      _ctrl.clear(); if (ctx.mounted) Navigator.pop(ctx);
+    }
     showDialog(context: context, builder: (ctx) => AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('저장 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: const Text('저장할까요?'),
+      content: _EnterToConfirm(onConfirm: () => doSave(ctx), child: const Text('저장할까요?')),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-          onPressed: () async {
-            await Store.saveSentence(SavedSentenceModel(
-              id: DateTime.now().millisecondsSinceEpoch.toString(), text: text,
-              createdAt: DateTime.now().toString().substring(0, 10)));
-            _ctrl.clear(); if (ctx.mounted) Navigator.pop(ctx);
-          }, child: const Text('저장')),
+          onPressed: () => doSave(ctx), child: const Text('저장')),
       ]));
   }
 
@@ -2600,6 +2682,12 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
                   ],
                   GestureDetector(onTap: () => _bulkRemind(context, sentences),
                     child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
+                  const SizedBox(width: 4),
+                  GestureDetector(onTap: () => _bulkCopy(sentences),
+                    child: _actionChip(Icons.copy, '복사', kBlueSky)),
+                  const SizedBox(width: 4),
+                  GestureDetector(onTap: () => _bulkCopyForAI(sentences),
+                    child: _actionChip(Icons.auto_awesome_rounded, 'AI 복사', kPurple)),
                   const SizedBox(width: 4),
                   GestureDetector(onTap: () => _bulkDelete(context, sentences),
                     child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
@@ -3076,7 +3164,6 @@ class _QuizScreenState extends State<QuizScreen> {
   // 채점
   final _answerCtrl = TextEditingController();
   List<Map<String, dynamic>> _results = []; // {question, userAnswer, correct, wrong}
-  Map<String, int> _wrongCounts = {}; // 많이 틀린 순
   
   // TTS
   bool _ttsPlayed = false;
@@ -3123,7 +3210,6 @@ class _QuizScreenState extends State<QuizScreen> {
       _questions = qs;
       _currentIdx = 0;
       _results = [];
-      _wrongCounts = {};
       _started = true;
       _finished = false;
       _ttsPlayed = false;
@@ -3200,8 +3286,8 @@ class _QuizScreenState extends State<QuizScreen> {
       'item': q,
     });
 
-    for (final w in wrongWords) {
-      _wrongCounts[w] = (_wrongCounts[w] ?? 0) + 1;
+    if (wrongWords.isNotEmpty) {
+      Store.logQuizWrong(correctText);
     }
 
     if (_currentIdx < _questions.length - 1) {
@@ -3227,7 +3313,6 @@ class _QuizScreenState extends State<QuizScreen> {
       _questions = wrongItems..shuffle();
       _currentIdx = 0;
       _results = [];
-      _wrongCounts = {};
       _finished = false;
       _ttsPlayed = false;
       _answerCtrl.clear();
@@ -3240,7 +3325,6 @@ class _QuizScreenState extends State<QuizScreen> {
       _started = false;
       _finished = false;
       _results = [];
-      _wrongCounts = {};
       _answerCtrl.clear();
     });
   }
@@ -3576,8 +3660,8 @@ Widget _buildQuiz() {
     final wrongItems = wrongResults.map((r) => r['item']).toList();
     final wrongAbbrItems = wrongItems.whereType<AbbreviationModel>().toList();
 
-    // 많이 틀린 단어 순 정렬
-    final sortedWrong = _wrongCounts.entries.toList()
+    // 최근 7일간 역대 오답 기록 기준으로, 많이 틀린 항목(전체 텍스트) 순 정렬
+    final sortedWrong = Store.getRecentWrongCounts(days: 7).entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
     return Scaffold(backgroundColor: Colors.white,
@@ -3637,36 +3721,34 @@ Widget _buildQuiz() {
           ]),
           const SizedBox(height: 8),
           ...wrongResults.map((r) {
-            final wrongWords = (r['wrong'] as List<String>);
+            final userAnswer = r['userAnswer'] as String;
             return Container(
               margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10),
                   border: Border.all(color: const Color(0xFFFFE0E0))),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  const Icon(Icons.close_rounded, color: Colors.red, size: 14),
-                  const SizedBox(width: 4),
-                  Expanded(child: Text(r['question'] as String,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
-                ]),
-                const SizedBox(height: 4),
-                Text('내 답: ${r['userAnswer']}',
-                    style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                if (wrongWords.isNotEmpty) ...[
-                  const SizedBox(height: 4),
-                  Wrap(spacing: 4, children: wrongWords.map((w) => Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(4)),
-                    child: Text(w, style: const TextStyle(fontSize: 11, color: Colors.red, fontWeight: FontWeight.w700)))).toList()),
-                ],
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('정답', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(r['question'] as String,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                ])),
+                Container(width: 1, height: 32, margin: const EdgeInsets.symmetric(horizontal: 10),
+                    color: const Color(0xFFFFD5D5)),
+                Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('내 답', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  Text(userAnswer.isEmpty ? '(입력 없음)' : userAnswer,
+                      style: const TextStyle(fontSize: 13, color: Colors.red, fontWeight: FontWeight.w700)),
+                ])),
               ]));
           }),
           const SizedBox(height: 20),
         ],
 
-        // 많이 틀린 단어 순위
+        // 많이 틀린 항목 순위 (최근 7일, 역대 테스트 기록 기준)
         if (sortedWrong.isNotEmpty) ...[
-          const Text('많이 틀린 단어',
+          const Text('최근 7일 많이 틀린 약어·문장',
               style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.grey)),
           const SizedBox(height: 8),
           ...sortedWrong.take(10).map((e) => Container(
