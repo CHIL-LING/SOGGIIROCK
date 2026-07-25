@@ -36,61 +36,86 @@ const List<Color> kGroupColors = [
 String encodeWord(String raw) => raw.replaceAll(' ', '*');
 String decodeWordForSearch(String word) => word.replaceAll('*', '');
 
+// 즐겨찾기는 "분류"가 아니라 그룹으로 취급한다. 저장되지 않는 가상(고정) 그룹.
+const String kFavGroupId = '__favorite__';
+final GroupModel kFavGroup = GroupModel(id: kFavGroupId, name: '⭐ 즐겨찾기', colorValue: 0xFFFFAA00, order: -1);
+
 class GroupModel {
   final String id, name;
   final int colorValue;
-  GroupModel({required this.id, required this.name, required this.colorValue});
+  final int order;
+  GroupModel({required this.id, required this.name, required this.colorValue, this.order = 0});
   Color get color => Color(colorValue);
-  Map<String, dynamic> toMap() => {'id': id, 'name': name, 'colorValue': colorValue};
+  Map<String, dynamic> toMap() => {'id': id, 'name': name, 'colorValue': colorValue, 'order': order};
   factory GroupModel.fromMap(Map m) => GroupModel(
-    id: m['id'] as String, name: m['name'] as String, colorValue: m['colorValue'] as int);
+    id: m['id'] as String, name: m['name'] as String, colorValue: m['colorValue'] as int,
+    order: m['order'] as int? ?? 0);
 }
 
 class AbbreviationModel {
   final String id, word;
   final List<String> initial, medial, final_;
-  final bool isComposite, isConcurrent, isAttached, isFavorite;
+  final bool isComposite, isConcurrent, isAttached;
   final List<String> groupIds;
   AbbreviationModel({
     required this.id, required this.word,
     this.initial = const [], this.medial = const [], this.final_ = const [],
     this.isComposite = false, this.isConcurrent = false,
-    this.isAttached = false, this.isFavorite = false,
+    this.isAttached = false,
     this.groupIds = const [],
   });
-  
+
+  // 즐겨찾기 = "__favorite__" 가상 그룹에 속해 있는지 여부 (그룹 기반)
+  bool get isFavorite => groupIds.contains(kFavGroupId);
+
   String get searchKey => decodeWordForSearch(word);
   String get displayWord => word;
 
 Map<String, dynamic> toMap() => {
     'id': id, 'word': word, 'initial': initial, 'medial': medial, 'final_': final_,
     'isComposite': isComposite, 'isConcurrent': isConcurrent,
-    'isAttached': isAttached, 'isFavorite': isFavorite, 'groupIds': groupIds,
+    'isAttached': isAttached, 'groupIds': groupIds,
   };
-  factory AbbreviationModel.fromMap(Map m) => AbbreviationModel(
-    id: m['id'] as String, word: m['word'] as String,
-    initial: List<String>.from(m['initial'] ?? []),
-    medial: List<String>.from(m['medial'] ?? []),
-    final_: List<String>.from(m['final_'] ?? []),
-    isComposite: m['isComposite'] as bool? ?? false,
-    isConcurrent: m['isConcurrent'] as bool? ?? false,
-    isAttached: m['isAttached'] as bool? ?? false,
-    isFavorite: m['isFavorite'] as bool? ?? false,
-    groupIds: m['groupIds'] != null
+  factory AbbreviationModel.fromMap(Map m) {
+    final gids = m['groupIds'] != null
         ? List<String>.from(m['groupIds'])
-        : (m['groupId'] != null ? [m['groupId'] as String] : []),
-  );
+        : (m['groupId'] != null ? [m['groupId'] as String] : <String>[]);
+    // 이전 버전 호환: 예전에 isFavorite 불리언으로 저장된 데이터는 즐겨찾기 그룹으로 자동 편입
+    if ((m['isFavorite'] as bool? ?? false) && !gids.contains(kFavGroupId)) {
+      gids.add(kFavGroupId);
+    }
+    return AbbreviationModel(
+      id: m['id'] as String, word: m['word'] as String,
+      initial: List<String>.from(m['initial'] ?? []),
+      medial: List<String>.from(m['medial'] ?? []),
+      final_: List<String>.from(m['final_'] ?? []),
+      isComposite: m['isComposite'] as bool? ?? false,
+      isConcurrent: m['isConcurrent'] as bool? ?? false,
+      isAttached: m['isAttached'] as bool? ?? false,
+      groupIds: gids,
+    );
+  }
   AbbreviationModel copyWith({
     String? word, List<String>? initial, List<String>? medial, List<String>? final_,
     bool? isComposite, bool? isConcurrent, bool? isAttached, bool? isFavorite,
     List<String>? groupIds,
-  }) => AbbreviationModel(
-    id: id, word: word ?? this.word, initial: initial ?? this.initial,
-    medial: medial ?? this.medial, final_: final_ ?? this.final_,
-    isComposite: isComposite ?? this.isComposite, isConcurrent: isConcurrent ?? this.isConcurrent,
-    isAttached: isAttached ?? this.isAttached, isFavorite: isFavorite ?? this.isFavorite,
-    groupIds: groupIds ?? this.groupIds,
-  );
+  }) {
+    final newGroupIds = List<String>.from(groupIds ?? this.groupIds);
+    if (isFavorite != null) {
+      if (isFavorite) {
+        if (!newGroupIds.contains(kFavGroupId)) newGroupIds.add(kFavGroupId);
+      } else {
+        newGroupIds.remove(kFavGroupId);
+      }
+    }
+    return AbbreviationModel(
+      id: id, word: word ?? this.word, initial: initial ?? this.initial,
+      medial: medial ?? this.medial, final_: final_ ?? this.final_,
+      isComposite: isComposite ?? this.isComposite, isConcurrent: isConcurrent ?? this.isConcurrent,
+      isAttached: isAttached ?? this.isAttached,
+      groupIds: newGroupIds,
+    );
+  }
 
   String get strokeDisplay {
     final parts = <String>[];
@@ -162,12 +187,39 @@ class Store {
   static Box get _rm => Hive.box('reminders');
   static Box get _gr => Hive.box('groups');
 
-  static List<GroupModel> getGroups() =>
-      _gr.values.map((e) => GroupModel.fromMap(Map.from(e as Map))).toList();
+  // 실제로 Hive에 저장된 그룹만 (그룹 관리 화면에서 사용, 즐겨찾기 가상그룹 제외), order순 정렬
+  static List<GroupModel> getRealGroups() {
+    final list = _gr.values.map((e) => GroupModel.fromMap(Map.from(e as Map))).toList();
+    list.sort((a, b) => a.order.compareTo(b.order));
+    return list;
+  }
+  // 즐겨찾기 가상그룹을 맨 앞에 포함한 전체 그룹 목록 (선택/필터/표시용)
+  static List<GroupModel> getGroups() => [kFavGroup, ...getRealGroups()];
   static Future<void> saveGroup(GroupModel g) => _gr.put(g.id, g.toMap());
   static Future<void> deleteGroup(String id) => _gr.delete(id);
   static GroupModel? findGroup(String id) {
-    try { return getGroups().firstWhere((g) => g.id == id); } catch (_) { return null; }
+    if (id == kFavGroupId) return kFavGroup;
+    try { return getRealGroups().firstWhere((g) => g.id == id); } catch (_) { return null; }
+  }
+  static int nextGroupOrder() {
+    final list = getRealGroups();
+    return list.isEmpty ? 0 : list.map((g) => g.order).reduce((a, b) => a > b ? a : b) + 1;
+  }
+  static Future<void> moveGroupUp(String id) async {
+    final list = getRealGroups();
+    final idx = list.indexWhere((g) => g.id == id);
+    if (idx <= 0) return;
+    final a = list[idx], b = list[idx - 1];
+    await saveGroup(GroupModel(id: a.id, name: a.name, colorValue: a.colorValue, order: b.order));
+    await saveGroup(GroupModel(id: b.id, name: b.name, colorValue: b.colorValue, order: a.order));
+  }
+  static Future<void> moveGroupDown(String id) async {
+    final list = getRealGroups();
+    final idx = list.indexWhere((g) => g.id == id);
+    if (idx == -1 || idx >= list.length - 1) return;
+    final a = list[idx], b = list[idx + 1];
+    await saveGroup(GroupModel(id: a.id, name: a.name, colorValue: a.colorValue, order: b.order));
+    await saveGroup(GroupModel(id: b.id, name: b.name, colorValue: b.colorValue, order: a.order));
   }
 
   static List<AbbreviationModel> getAbbreviations() =>
@@ -818,6 +870,41 @@ List<AbbreviationModel> sortedSearchResults(List<AbbreviationModel> all, String 
   });
   return filtered;
 }
+
+// 약어 목록 정렬: alpha=가나다순, saved=저장 순서(기본, 원래 순서 유지), group=그룹순, type=분류순
+List<AbbreviationModel> sortAbbreviations(List<AbbreviationModel> list, String mode, List<GroupModel> groups) {
+  final result = List<AbbreviationModel>.from(list);
+  switch (mode) {
+    case 'alpha':
+      result.sort((a, b) => a.searchKey.compareTo(b.searchKey));
+      break;
+    case 'group':
+      int rank(AbbreviationModel a) {
+        for (int i = 0; i < groups.length; i++) {
+          if (a.groupIds.contains(groups[i].id)) return i;
+        }
+        return 999999;
+      }
+      result.sort((a, b) => rank(a).compareTo(rank(b)));
+      break;
+    case 'type':
+      int rank(AbbreviationModel a) {
+        if (a.isConcurrent) return 0;
+        if (a.isComposite) return 1;
+        if (a.isAttached) return 2;
+        return 3;
+      }
+      result.sort((a, b) => rank(a).compareTo(rank(b)));
+      break;
+    case 'saved':
+    default:
+      break;
+  }
+  return result;
+}
+const Map<String, String> kSortModeLabels = {
+  'saved': '저장 순서순', 'alpha': '가나다순', 'group': '그룹순', 'type': '분류순',
+};
 
 class SoggiApp extends StatelessWidget {
   const SoggiApp({super.key});
@@ -1505,7 +1592,6 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
               Text(abbr.displayWord.replaceAll('*', ' '), style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
-              if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 10)),
               ...abbr.typeLabels.map((l) {
                 final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
                 return Container(margin: const EdgeInsets.only(left: 3),
@@ -1585,7 +1671,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                 keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  TextField(controller: _analyzerCtrl, focusNode: _focusNode, maxLines: 4,
+                  TextField(controller: _analyzerCtrl, focusNode: _focusNode, minLines: 10, maxLines: 10,
                     onChanged: (_) => setState(() => _analyzerAnalyzed = false),
                     decoration: InputDecoration(hintText: '분석할 문장을 입력하세요...',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
@@ -1697,7 +1783,6 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                                   Flexible(child: Text(a.displayWord.replaceAll('*', ' '),
                                       style: TextStyle(color: a.typeColor, fontWeight: FontWeight.w700, fontSize: 12),
                                       overflow: TextOverflow.ellipsis)),
-                                  if (a.isFavorite) const Text('⭐', style: TextStyle(fontSize: 9)),
                                 ]),
                                 Wrap(spacing: 2, children: [
                                   ...a.typeLabels.map((l) {
@@ -1830,6 +1915,12 @@ class _SearchScreenState extends State<SearchScreen> {
   String? _filterGroupId;
   final Set<String> _selected = {};
   bool _selectMode = false;
+  String _sortMode = Hive.box('settings').get('abbr_sort_mode', defaultValue: 'saved') as String;
+
+  void _setSortMode(String mode) {
+    setState(() => _sortMode = mode);
+    Hive.box('settings').put('abbr_sort_mode', mode);
+  }
 
   void _toggleSelectMode() => setState(() { _selectMode = !_selectMode; _selected.clear(); });
   void _toggleSelect(String id) => setState(() {
@@ -1903,11 +1994,10 @@ class _SearchScreenState extends State<SearchScreen> {
       title: Text('분류 변경 (${_selected.length}개)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: _TypeToggleRow(
         isComposite: isComposite, isConcurrent: isConcurrent,
-        isAttached: isAttached, isFavorite: false,
+        isAttached: isAttached,
         onCompositeChanged: (v) => setS(() => isComposite = v),
         onConcurrentChanged: (v) => setS(() => isConcurrent = v),
-        onAttachedChanged: (v) => setS(() => isAttached = v),
-        onFavoriteChanged: (_) {}),
+        onAttachedChanged: (v) => setS(() => isAttached = v)),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -1940,40 +2030,35 @@ class _SearchScreenState extends State<SearchScreen> {
             final q = _ctrl.text.trim();
             final all = Store.getAbbreviations();
             final groups = Store.getGroups();
-            var results = q.isEmpty ? all : sortedSearchResults(all, q);
+            var results = q.isEmpty ? sortAbbreviations(all, _sortMode, groups) : sortedSearchResults(all, q);
             if (_showFavOnly) results = results.where((a) => a.isFavorite).toList();
             if (_filterGroupId != null) results = results.where((a) => a.groupIds.contains(_filterGroupId)).toList();
 
             return Scaffold(backgroundColor: Colors.white,
               body: SafeArea(child: Column(children: [
-                Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12), child: Row(children: [
-                  const Expanded(child: Text('약어 검색', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
+                Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('약어 검색', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
                   if (_selectMode) ...[
                     GestureDetector(onTap: () => _bulkFav(results),
                       child: _actionChip(Icons.star_rounded, '즐겨찾기', const Color(0xFFFFAA00))),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: () => _bulkRemind(context, results),
                       child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: () => _bulkSetGroup(context, results),
                       child: _actionChip(Icons.label_rounded, '그룹', kBlueSky)),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: () => _bulkEditType(context, results),
                       child: _actionChip(Icons.edit_rounded, '분류', kPurple)),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: () => _openSelectedView(context, results),
                       child: _actionChip(Icons.visibility_rounded, '모아보기', kBlueDark)),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: () => _bulkDelete(context, results),
                       child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
-                    const SizedBox(width: 4),
                     GestureDetector(onTap: _toggleSelectMode,
                       child: _actionChip(Icons.close, '취소', Colors.grey)),
                   ] else ...[
                     GestureDetector(onTap: () => setState(() { _showFavOnly = !_showFavOnly; _filterGroupId = null; }),
                       child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        margin: const EdgeInsets.only(right: 6),
                         decoration: BoxDecoration(
                           color: _showFavOnly ? const Color(0xFFFFD700).withOpacity(0.15) : kBlueLight,
                           borderRadius: BorderRadius.circular(20),
@@ -1988,7 +2073,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       GestureDetector(onTap: () => _showGroupFilter(context, groups),
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          margin: const EdgeInsets.only(right: 6),
                           decoration: BoxDecoration(
                             color: kBlueLight, borderRadius: BorderRadius.circular(20),
                             border: Border.all(
@@ -2002,14 +2086,26 @@ class _SearchScreenState extends State<SearchScreen> {
                                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
                                     color: _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.color ?? kBlue) : Colors.grey)),
                           ]))),
+                    PopupMenuButton<String>(
+                      tooltip: '정렬',
+                      onSelected: _setSortMode,
+                      itemBuilder: (_) => kSortModeLabels.entries
+                          .map((e) => PopupMenuItem(value: e.key, child: Text(e.value)))
+                          .toList(),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.sort_rounded, size: 16, color: kBlue),
+                          const SizedBox(width: 4),
+                          Text(kSortModeLabels[_sortMode] ?? '정렬', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: kBlue)),
+                        ]))),
                     GestureDetector(onTap: _toggleSelectMode,
                       child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        margin: const EdgeInsets.only(right: 6),
                         decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
                         child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
                     GestureDetector(onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GroupManageScreen())),
                       child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        margin: const EdgeInsets.only(right: 6),
                         decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
                         child: const Icon(Icons.folder_rounded, size: 16, color: kBlue))),
                     ElevatedButton.icon(onPressed: () => _showAbbrEditDialog(context),
@@ -2018,6 +2114,7 @@ class _SearchScreenState extends State<SearchScreen> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
                         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
                   ],
+                  ]),
                 ])),
                 if (_selectMode)
                   Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -2177,7 +2274,6 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
       'isComposite': from?.isComposite ?? false,
       'isConcurrent': from?.isConcurrent ?? false,
       'isAttached': from?.isAttached ?? false,
-      'isFavorite': from?.isFavorite ?? false,
     });
     rowGroupIds.add(from?.groupIds != null ? List<String>.from(from!.groupIds) : <String>[]);
     wordFocusNodes.add(FocusNode());
@@ -2240,7 +2336,6 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
             isComposite: rowFlags[i]['isComposite']!,
             isConcurrent: rowFlags[i]['isConcurrent']!,
             isAttached: rowFlags[i]['isAttached']!,
-            isFavorite: rowFlags[i]['isFavorite']!,
             groupIds: rowGroupIds[i]));
         }
       }
@@ -2256,11 +2351,10 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         const SizedBox(height: 8),
         _TypeToggleRow(
           isComposite: rowFlags[i]['isComposite']!, isConcurrent: rowFlags[i]['isConcurrent']!,
-          isAttached: rowFlags[i]['isAttached']!, isFavorite: rowFlags[i]['isFavorite']!,
+          isAttached: rowFlags[i]['isAttached']!,
           onCompositeChanged: (v) => setS(() => rowFlags[i]['isComposite'] = v),
           onConcurrentChanged: (v) => setS(() => rowFlags[i]['isConcurrent'] = v),
-          onAttachedChanged: (v) => setS(() => rowFlags[i]['isAttached'] = v),
-          onFavoriteChanged: (v) => setS(() => rowFlags[i]['isFavorite'] = v)),
+          onAttachedChanged: (v) => setS(() => rowFlags[i]['isAttached'] = v)),
        if (groups.isNotEmpty) ...[
           const SizedBox(height: 6),
           Row(children: [
@@ -2390,7 +2484,7 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
   Widget build(BuildContext context) {
     return ValueListenableBuilder(valueListenable: Hive.box('groups').listenable(),
       builder: (context, box, _) {
-        final groups = Store.getGroups();
+        final groups = Store.getRealGroups();
         return Scaffold(backgroundColor: Colors.white,
           appBar: AppBar(backgroundColor: Colors.white, elevation: 0,
             leading: IconButton(icon: const Icon(Icons.arrow_back_ios_rounded, color: kBlue),
@@ -2410,6 +2504,15 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
                     decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
                         border: Border.all(color: const Color(0xFFEEF0F8))),
                     child: Row(children: [
+                      Column(mainAxisSize: MainAxisSize.min, children: [
+                        GestureDetector(onTap: i == 0 ? null : () => Store.moveGroupUp(g.id),
+                          child: Icon(Icons.keyboard_arrow_up_rounded, size: 20,
+                              color: i == 0 ? const Color(0xFFDDDDDD) : Colors.grey)),
+                        GestureDetector(onTap: i == groups.length - 1 ? null : () => Store.moveGroupDown(g.id),
+                          child: Icon(Icons.keyboard_arrow_down_rounded, size: 20,
+                              color: i == groups.length - 1 ? const Color(0xFFDDDDDD) : Colors.grey)),
+                      ]),
+                      const SizedBox(width: 6),
                       CircleAvatar(backgroundColor: g.color, radius: 14,
                         child: Text(g.name.isNotEmpty ? g.name[0] : '?',
                             style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 12))),
@@ -2454,7 +2557,8 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
             if (name.isEmpty) return;
             await Store.saveGroup(GroupModel(
               id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-              name: name, colorValue: selectedColor.value));
+              name: name, colorValue: selectedColor.value,
+              order: existing?.order ?? Store.nextGroupOrder()));
             if (ctx.mounted) Navigator.pop(ctx);
           }, child: const Text('저장')),
       ])));
@@ -2488,7 +2592,6 @@ final abbrGroups = groups.where((g) => abbr.groupIds.contains(g.id)).toList();  
       Row(children: [
         if (abbr.isAttached) const Text('↙ ', style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
         Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
-        if (abbr.isFavorite) const Text(' ⭐', style: TextStyle(fontSize: 12)),
         ...abbr.typeLabels.map((label) {
           final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
           final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
@@ -2541,19 +2644,17 @@ class _AbbrListTileState extends State<_AbbrListTile> {
 }
 
 class _TypeToggleRow extends StatelessWidget {
-  final bool isComposite, isConcurrent, isAttached, isFavorite;
-  final ValueChanged<bool> onCompositeChanged, onConcurrentChanged, onAttachedChanged, onFavoriteChanged;
+  final bool isComposite, isConcurrent, isAttached;
+  final ValueChanged<bool> onCompositeChanged, onConcurrentChanged, onAttachedChanged;
   const _TypeToggleRow({required this.isComposite, required this.isConcurrent,
-    required this.isAttached, required this.isFavorite,
+    required this.isAttached,
     required this.onCompositeChanged, required this.onConcurrentChanged,
-    required this.onAttachedChanged, required this.onFavoriteChanged});
+    required this.onAttachedChanged});
   @override
   Widget build(BuildContext context) => Wrap(spacing: 6, runSpacing: 6, children: [
     _ToggleChip(label: '합성약어', color: kBlueSky, selected: isComposite, onTap: () => onCompositeChanged(!isComposite)),
     _ToggleChip(label: '동시처리', color: kPurple, selected: isConcurrent, onTap: () => onConcurrentChanged(!isConcurrent)),
     _ToggleChip(label: '붙여쓰기', color: kBlueDark, selected: isAttached, onTap: () => onAttachedChanged(!isAttached)),
-    _ToggleChip(label: '즐겨찾기', color: const Color(0xFFFFAA00), selected: isFavorite,
-        onTap: () => onFavoriteChanged(!isFavorite), icon: Icons.star_rounded),
   ]);
 }
 class _ToggleChip extends StatelessWidget {
@@ -3404,86 +3505,89 @@ Widget _buildSetup() {
         const Text('테스트 설정', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900)),
         const SizedBox(height: 24),
 
-        // TTS 속도
-// 문제 수 + TTS 속도
-        Row(children: [
-          _lbl('문제 수'),
-          const Spacer(),
-          _lbl('TTS 속도'),
-        ]),
-        Row(children: [
-          // 문제 수 버튼
-          GestureDetector(
-            onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
-          const SizedBox(width: 8),
-          SizedBox(width: 60, child: TextField(
-            keyboardType: TextInputType.number,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: '$_quizCount',
-              hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
-              contentPadding: const EdgeInsets.symmetric(vertical: 8),
-              filled: true, fillColor: kBlueLight,
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
-            onSubmitted: (v) {
-              final n = int.tryParse(v);
-              if (n != null && n > 0) setState(() => _quizCount = n);
-            })),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
-          const Spacer(),
-          // TTS 속도 버튼
-          GestureDetector(
-            onTap: () async {
-              final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-              final cur = TtsController.instance.speed;
-              final idx = speeds.indexWhere((s) => s >= cur);
-              if (idx > 0) {
-                TtsController.instance.speed = speeds[idx - 1];
-                await TtsController.instance.applySettings();
-                setState(() {});
-              }
-            },
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
-          const SizedBox(width: 8),
-          Container(
-            width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
-            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-            child: Text(() {
-              final v = TtsController.instance.speed;
-              if (v <= 0.2) return '매우 느림';
-              if (v <= 0.4) return '느림';
-              if (v <= 0.6) return '보통';
-              if (v <= 0.8) return '빠름';
-              return '매우 빠름';
-            }(), textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
-          const SizedBox(width: 8),
-          GestureDetector(
-            onTap: () async {
-              final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-              final cur = TtsController.instance.speed;
-              final idx = speeds.lastIndexWhere((s) => s <= cur);
-              if (idx < speeds.length - 1) {
-                TtsController.instance.speed = speeds[idx + 1];
-                await TtsController.instance.applySettings();
-                setState(() {});
-              }
-            },
-            child: Container(width: 36, height: 36,
-              decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-              child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+        // 문제 수 + TTS 속도 (붙여서 나란히 배치)
+        Wrap(spacing: 20, runSpacing: 16, children: [
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _lbl('문제 수'),
+            const SizedBox(height: 8),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              GestureDetector(
+                onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
+                child: Container(width: 36, height: 36,
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+              const SizedBox(width: 8),
+              SizedBox(width: 60, child: TextField(
+                keyboardType: TextInputType.number,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: '$_quizCount',
+                  hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                  filled: true, fillColor: kBlueLight,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
+                onSubmitted: (v) {
+                  final n = int.tryParse(v);
+                  if (n != null && n > 0) setState(() => _quizCount = n);
+                })),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
+                child: Container(width: 36, height: 36,
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+            ]),
+          ]),
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _lbl('TTS 속도'),
+            const SizedBox(height: 8),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              GestureDetector(
+                onTap: () async {
+                  final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+                  final cur = TtsController.instance.speed;
+                  final idx = speeds.indexWhere((s) => s >= cur);
+                  if (idx > 0) {
+                    TtsController.instance.speed = speeds[idx - 1];
+                    await TtsController.instance.applySettings();
+                    setState(() {});
+                  }
+                },
+                child: Container(width: 36, height: 36,
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
+              const SizedBox(width: 8),
+              Container(
+                width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
+                decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                child: Text(() {
+                  final v = TtsController.instance.speed;
+                  if (v <= 0.2) return '매우 느림';
+                  if (v <= 0.4) return '느림';
+                  if (v <= 0.6) return '보통';
+                  if (v <= 0.8) return '빠름';
+                  return '매우 빠름';
+                }(), textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
+              const SizedBox(width: 8),
+              GestureDetector(
+                onTap: () async {
+                  final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
+                  final cur = TtsController.instance.speed;
+                  final idx = speeds.lastIndexWhere((s) => s <= cur);
+                  if (idx < speeds.length - 1) {
+                    TtsController.instance.speed = speeds[idx + 1];
+                    await TtsController.instance.applySettings();
+                    setState(() {});
+                  }
+                },
+                child: Container(width: 36, height: 36,
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+                  child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+            ]),
+          ]),
         ]),
         const SizedBox(height: 32),
         // 모드 선택
