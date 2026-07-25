@@ -188,8 +188,19 @@ class Store {
   static Box get _gr => Hive.box('groups');
 
   // 실제로 Hive에 저장된 그룹만 (그룹 관리 화면에서 사용, 즐겨찾기 가상그룹 제외), order순 정렬
-  static List<GroupModel> getRealGroups() {
+static List<GroupModel> getRealGroups() {
     final list = _gr.values.map((e) => GroupModel.fromMap(Map.from(e as Map))).toList();
+    // 구버전 데이터 호환: order 값이 없거나 중복돼 있으면(전부 0 등) 현재 순서 기준으로 순번을 새로 매겨 저장
+    final distinctOrders = list.map((g) => g.order).toSet();
+    if (distinctOrders.length != list.length) {
+      for (int i = 0; i < list.length; i++) {
+        if (list[i].order != i) {
+          final fixed = GroupModel(id: list[i].id, name: list[i].name, colorValue: list[i].colorValue, order: i);
+          _gr.put(fixed.id, fixed.toMap());
+          list[i] = fixed;
+        }
+      }
+    }
     list.sort((a, b) => a.order.compareTo(b.order));
     return list;
   }
