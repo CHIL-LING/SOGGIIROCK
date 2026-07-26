@@ -1150,6 +1150,25 @@ Widget _actionChip(IconData icon, String label, Color color) => Container(
     Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
   ]));
 
+// 헤더 상단 필터/정렬용 통일된 라벨 칩 (활성화 여부에 따라 색이 강조됨)
+Widget _toolChip(IconData icon, String label, {bool active = false, Color color = kBlue}) => Container(
+  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+  decoration: BoxDecoration(
+    color: active ? color.withOpacity(0.12) : kBlueLight,
+    borderRadius: BorderRadius.circular(20),
+    border: Border.all(color: active ? color : Colors.transparent, width: 1.2)),
+  child: Row(mainAxisSize: MainAxisSize.min, children: [
+    Icon(icon, size: 15, color: active ? color : Colors.grey.shade600),
+    const SizedBox(width: 4),
+    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: active ? color : Colors.grey.shade600)),
+  ]));
+
+// 헤더 상단 아이콘 전용 원형 버튼 (선택모드 토글, 그룹관리 이동 등 라벨 없는 내비게이션용)
+Widget _iconToolBtn(IconData icon, {Color color = kBlue}) => Container(
+  padding: const EdgeInsets.all(8),
+  decoration: const BoxDecoration(color: kBlueLight, shape: BoxShape.circle),
+  child: Icon(icon, size: 16, color: color));
+
 Widget _lbl(String text) => Padding(padding: const EdgeInsets.only(bottom: 6),
   child: Text(text, style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)));
 
@@ -1689,7 +1708,8 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                 keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  TextField(controller: _analyzerCtrl, focusNode: _focusNode, minLines: 10, maxLines: 10,
+                  TextField(controller: _analyzerCtrl, focusNode: _focusNode,
+                    minLines: _analyzerAnalyzed ? 3 : 10, maxLines: _analyzerAnalyzed ? 3 : 10,
                     onChanged: (_) => setState(() => _analyzerAnalyzed = false),
                     decoration: InputDecoration(hintText: '분석할 문장을 입력하세요...',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
@@ -1929,7 +1949,6 @@ class SearchScreen extends StatefulWidget {
 }
 class _SearchScreenState extends State<SearchScreen> {
   final _ctrl = TextEditingController();
-  bool _showFavOnly = false;
   String? _filterGroupId;
   final Set<String> _selected = {};
   bool _selectMode = false;
@@ -2049,7 +2068,6 @@ class _SearchScreenState extends State<SearchScreen> {
             final all = Store.getAbbreviations();
             final groups = Store.getGroups();
             var results = q.isEmpty ? sortAbbreviations(all, _sortMode, groups) : sortedSearchResults(all, q);
-            if (_showFavOnly) results = results.where((a) => a.isFavorite).toList();
             if (_filterGroupId != null) results = results.where((a) => a.groupIds.contains(_filterGroupId)).toList();
 
             return Scaffold(backgroundColor: Colors.white,
@@ -2074,58 +2092,24 @@ class _SearchScreenState extends State<SearchScreen> {
                     GestureDetector(onTap: _toggleSelectMode,
                       child: _actionChip(Icons.close, '취소', Colors.grey)),
                   ] else ...[
-                    GestureDetector(onTap: () => setState(() { _showFavOnly = !_showFavOnly; _filterGroupId = null; }),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: _showFavOnly ? const Color(0xFFFFD700).withOpacity(0.15) : kBlueLight,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: _showFavOnly ? const Color(0xFFFFD700) : Colors.transparent, width: 1.2)),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.star_rounded, size: 16, color: _showFavOnly ? const Color(0xFFFFD700) : Colors.grey),
-                          const SizedBox(width: 4),
-                          Text('즐겨찾기', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                              color: _showFavOnly ? const Color(0xFFB8860B) : Colors.grey)),
-                        ]))),
                     if (groups.isNotEmpty)
                       GestureDetector(onTap: () => _showGroupFilter(context, groups),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: kBlueLight, borderRadius: BorderRadius.circular(20),
-                            border: Border.all(
-                              color: _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.color ?? kBlue) : Colors.transparent,
-                              width: 1.2)),
-                          child: Row(mainAxisSize: MainAxisSize.min, children: [
-                            Icon(Icons.label_rounded, size: 16,
-                                color: _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.color ?? kBlue) : Colors.grey),
-                            const SizedBox(width: 4),
-                            Text(_filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.name ?? '그룹') : '그룹',
-                                style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
-                                    color: _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.color ?? kBlue) : Colors.grey)),
-                          ]))),
+                        child: _toolChip(Icons.label_rounded,
+                          _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.name ?? '그룹') : '그룹',
+                          active: _filterGroupId != null,
+                          color: _filterGroupId != null ? (Store.findGroup(_filterGroupId!)?.color ?? kBlue) : kBlue)),
                     PopupMenuButton<String>(
                       tooltip: '정렬',
                       onSelected: _setSortMode,
                       itemBuilder: (_) => kSortModeLabels.entries
                           .map((e) => PopupMenuItem(value: e.key, child: Text(e.value)))
                           .toList(),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                        child: Row(mainAxisSize: MainAxisSize.min, children: [
-                          const Icon(Icons.sort_rounded, size: 16, color: kBlue),
-                          const SizedBox(width: 4),
-                          Text(kSortModeLabels[_sortMode] ?? '정렬', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: kBlue)),
-                        ]))),
+                      child: _toolChip(Icons.sort_rounded, kSortModeLabels[_sortMode] ?? '정렬',
+                          active: _sortMode != 'saved')),
                     GestureDetector(onTap: _toggleSelectMode,
-                      child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                        child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
+                      child: _iconToolBtn(Icons.checklist_rounded)),
                     GestureDetector(onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GroupManageScreen())),
-                      child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                        child: const Icon(Icons.folder_rounded, size: 16, color: kBlue))),
+                      child: _iconToolBtn(Icons.folder_rounded)),
                     ElevatedButton.icon(onPressed: () => _showAbbrEditDialog(context),
                       icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
                       style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
@@ -2156,9 +2140,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 const SizedBox(height: 8),
                 Expanded(child: results.isEmpty
                   ? Center(child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-                      Text(_showFavOnly ? '즐겨찾기한 약어가 없습니다' : '약어가 없습니다',
+                      Text(_filterGroupId == kFavGroupId ? '즐겨찾기한 약어가 없습니다' : '약어가 없습니다',
                           style: const TextStyle(color: Colors.grey, fontSize: 14)),
-                      if (!_showFavOnly && _filterGroupId == null) ...[
+                      if (_filterGroupId == null) ...[
                         const SizedBox(height: 12),
                         OutlinedButton(onPressed: () => _showAbbrEditDialog(context),
                           style: OutlinedButton.styleFrom(foregroundColor: kBlue, side: const BorderSide(color: kBlue),
@@ -2799,33 +2783,30 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
         return Scaffold(backgroundColor: Colors.white, resizeToAvoidBottomInset: true,
           body: SafeArea(child: Column(children: [
             Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
-              child: Row(children: [
-                const Expanded(child: Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  const Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  if (!_selectMode)
+                    GestureDetector(onTap: _toggleSelectMode, child: _iconToolBtn(Icons.checklist_rounded)),
+                ]),
                 if (_selectMode) ...[
-                  if (_selected.length == 1) ...[
-                    GestureDetector(onTap: () => _editSelected(context, sentences),
-                      child: _actionChip(Icons.edit_rounded, '수정', kBlueSky)),
-                    const SizedBox(width: 4),
-                  ],
-                  GestureDetector(onTap: () => _bulkRemind(context, sentences),
-                    child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
-                  const SizedBox(width: 4),
-                  GestureDetector(onTap: () => _bulkCopy(sentences),
-                    child: _actionChip(Icons.copy, '복사', kBlueSky)),
-                  const SizedBox(width: 4),
-                  GestureDetector(onTap: () => _bulkCopyForAI(sentences),
-                    child: _actionChip(Icons.auto_awesome_rounded, 'AI 복사', kPurple)),
-                  const SizedBox(width: 4),
-                  GestureDetector(onTap: () => _bulkDelete(context, sentences),
-                    child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
-                  const SizedBox(width: 4),
-                  GestureDetector(onTap: _toggleSelectMode,
-                    child: _actionChip(Icons.close, '취소', Colors.grey)),
-                ] else
-                  GestureDetector(onTap: _toggleSelectMode,
-                    child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                      child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    if (_selected.length == 1)
+                      GestureDetector(onTap: () => _editSelected(context, sentences),
+                        child: _actionChip(Icons.edit_rounded, '수정', kBlueSky)),
+                    GestureDetector(onTap: () => _bulkRemind(context, sentences),
+                      child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
+                    GestureDetector(onTap: () => _bulkCopy(sentences),
+                      child: _actionChip(Icons.copy, '복사', kBlueSky)),
+                    GestureDetector(onTap: () => _bulkCopyForAI(sentences),
+                      child: _actionChip(Icons.auto_awesome_rounded, 'AI 복사', kPurple)),
+                    GestureDetector(onTap: () => _bulkDelete(context, sentences),
+                      child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
+                    GestureDetector(onTap: _toggleSelectMode,
+                      child: _actionChip(Icons.close, '취소', Colors.grey)),
+                  ]),
+                ],
               ])),
             if (_selectMode)
               Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -3108,10 +3089,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
                   if (!_selectMode) ...[
                     Row(children: [
                       GestureDetector(onTap: _toggleSelectMode,
-                        child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          margin: const EdgeInsets.only(right: 8),
-                          decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                          child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
+                        child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.checklist_rounded))),
                       ElevatedButton.icon(onPressed: () => _showAddReminderDialog(context),
                         icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
                         style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
@@ -3210,7 +3188,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
 
   void _showAddReminderDialog(BuildContext context) {
     int interval = 1; bool repeat = false;
-    String type = 'word'; String? selectedTarget;
+    String type = 'word'; final Set<String> selectedTargets = {};
     final customCtrl = TextEditingController(); bool useCustom = false;
     final pickerSearchCtrl = TextEditingController();
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
@@ -3226,18 +3204,22 @@ class _RemindersScreenState extends State<RemindersScreen> {
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           _lbl('유형'),
           Row(children: [
-            Expanded(child: GestureDetector(onTap: () => setS(() { type = 'word'; selectedTarget = null; }),
+            Expanded(child: GestureDetector(onTap: () => setS(() { type = 'word'; selectedTargets.clear(); }),
               child: Container(padding: const EdgeInsets.symmetric(vertical: 8),
                 decoration: BoxDecoration(color: type == 'word' ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(8)),
                 child: Center(child: Text('약어', style: TextStyle(color: type == 'word' ? Colors.white : kBlue, fontWeight: FontWeight.w700)))))),
             const SizedBox(width: 8),
-            Expanded(child: GestureDetector(onTap: () => setS(() { type = 'sentence'; selectedTarget = null; }),
+            Expanded(child: GestureDetector(onTap: () => setS(() { type = 'sentence'; selectedTargets.clear(); }),
               child: Container(padding: const EdgeInsets.symmetric(vertical: 8),
                 decoration: BoxDecoration(color: type == 'sentence' ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(8)),
                 child: Center(child: Text('문장', style: TextStyle(color: type == 'sentence' ? Colors.white : kBlue, fontWeight: FontWeight.w700)))))),
           ]),
           const SizedBox(height: 12),
-          _lbl(type == 'word' ? '약어 선택' : '문장 선택'),
+          Row(children: [
+            Expanded(child: _lbl(type == 'word' ? '약어 선택 (중복 선택 가능)' : '문장 선택 (중복 선택 가능)')),
+            if (selectedTargets.isNotEmpty)
+              Text('${selectedTargets.length}개 선택됨', style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
+          ]),
           TextField(controller: pickerSearchCtrl, onChanged: (_) => setS(() {}),
             decoration: _inputDeco('검색...').copyWith(
               prefixIcon: const Icon(Icons.search, size: 18, color: Colors.grey),
@@ -3250,18 +3232,23 @@ class _RemindersScreenState extends State<RemindersScreen> {
           else Container(height: 280,
             decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE0E0E0)), borderRadius: BorderRadius.circular(8)),
             child: ListView.builder(itemCount: items.length, itemBuilder: (_, i) {
-              final item = items[i]; final isSel = selectedTarget == item;
-              return GestureDetector(onTap: () => setS(() { selectedTarget = item; useCustom = false; customCtrl.clear(); }),
-                child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              final item = items[i]; final isSel = selectedTargets.contains(item);
+              return GestureDetector(
+                onTap: () => setS(() { if (isSel) selectedTargets.remove(item); else selectedTargets.add(item); }),
+                child: Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   color: isSel ? kBlueLight : Colors.transparent,
-                  child: Text(item, style: TextStyle(fontSize: 13, color: isSel ? kBlue : Colors.black87,
-                      fontWeight: isSel ? FontWeight.w600 : FontWeight.w400), maxLines: 2, overflow: TextOverflow.ellipsis)));
+                  child: Row(children: [
+                    Checkbox(value: isSel, activeColor: kBlue,
+                      onChanged: (v) => setS(() { if (v == true) selectedTargets.add(item); else selectedTargets.remove(item); })),
+                    Expanded(child: Text(item, style: TextStyle(fontSize: 13, color: isSel ? kBlue : Colors.black87,
+                        fontWeight: isSel ? FontWeight.w600 : FontWeight.w400), maxLines: 2, overflow: TextOverflow.ellipsis)),
+                  ])));
             })),
           const SizedBox(height: 8),
           Row(children: [
             Checkbox(value: useCustom, activeColor: kBlue,
-                onChanged: (v) => setS(() { useCustom = v ?? false; if (useCustom) selectedTarget = null; })),
-            const Text('직접 입력', style: TextStyle(fontSize: 13)),
+                onChanged: (v) => setS(() { useCustom = v ?? false; })),
+            const Text('직접 입력 추가', style: TextStyle(fontSize: 13)),
           ]),
           if (useCustom) TextField(controller: customCtrl, decoration: _inputDeco('내용을 입력하세요')),
           const SizedBox(height: 12),
@@ -3274,15 +3261,16 @@ class _RemindersScreenState extends State<RemindersScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             onPressed: () async {
-              final target = useCustom ? customCtrl.text.trim() : selectedTarget;
-              if (target == null || target.isEmpty) return;
+              final targets = <String>[...selectedTargets];
+              if (useCustom && customCtrl.text.trim().isNotEmpty) targets.add(customCtrl.text.trim());
+              if (targets.isEmpty) return;
               Navigator.pop(ctx);
-              final dup = Store.findReminder(target);
-              if (dup != null) {
+              final hasDup = targets.any((t) => Store.findReminder(t) != null);
+              if (hasDup) {
                 final ok = await showDialog<bool>(context: context, builder: (c2) => AlertDialog(
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   title: const Text('중복 리마인드', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                  content: const Text('이미 추가된 리마인드입니다.\n그래도 저장하시겠습니까?'),
+                  content: const Text('이미 추가된 리마인드가 있습니다.\n그래도 저장하시겠습니까?'),
                   actions: [
                     TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
                     ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -3291,8 +3279,11 @@ class _RemindersScreenState extends State<RemindersScreen> {
               }
               final date = DateTime.now().add(Duration(days: interval));
               final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-              await Store.saveReminder(ReminderModel(id: DateTime.now().millisecondsSinceEpoch.toString(),
-                type: type, target: target, date: ds, intervalDays: interval, repeat: repeat));
+              for (int i = 0; i < targets.length; i++) {
+                await Store.saveReminder(ReminderModel(
+                  id: '${DateTime.now().millisecondsSinceEpoch}_$i',
+                  type: type, target: targets[i], date: ds, intervalDays: interval, repeat: repeat));
+              }
             }, child: const Text('설정')),
         ]);
     }));
