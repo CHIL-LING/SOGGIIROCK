@@ -2073,7 +2073,21 @@ class _SearchScreenState extends State<SearchScreen> {
             return Scaffold(backgroundColor: Colors.white,
               body: SafeArea(child: Column(children: [
                 Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('약어 검색', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                    const Text('약어 검색', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                    if (!_selectMode)
+                      Row(children: [
+                        GestureDetector(onTap: _toggleSelectMode,
+                          child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.checklist_rounded))),
+                        GestureDetector(onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GroupManageScreen())),
+                          child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.folder_rounded))),
+                        ElevatedButton.icon(onPressed: () => _showAbbrEditDialog(context),
+                          icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
+                          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
+                      ]),
+                  ]),
                   const SizedBox(height: 10),
                   Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
                   if (_selectMode) ...[
@@ -2106,15 +2120,6 @@ class _SearchScreenState extends State<SearchScreen> {
                           .toList(),
                       child: _toolChip(Icons.sort_rounded, kSortModeLabels[_sortMode] ?? '정렬',
                           active: _sortMode != 'saved')),
-                    GestureDetector(onTap: _toggleSelectMode,
-                      child: _iconToolBtn(Icons.checklist_rounded)),
-                    GestureDetector(onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GroupManageScreen())),
-                      child: _iconToolBtn(Icons.folder_rounded)),
-                    ElevatedButton.icon(onPressed: () => _showAbbrEditDialog(context),
-                      icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
-                      style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
                   ],
                   ]),
                 ])),
