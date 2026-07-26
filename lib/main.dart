@@ -187,22 +187,16 @@ class Store {
   static Box get _rm => Hive.box('reminders');
   static Box get _gr => Hive.box('groups');
 
-  // 실제로 Hive에 저장된 그룹만 (그룹 관리 화면에서 사용, 즐겨찾기 가상그룹 제외), order순 정렬
-static List<GroupModel> getRealGroups() {
+  // 실제로 Hive에 저장된 그룹만 (그룹 관리 화면에서 사용, 즐겨찾기 가상그룹 제외)
+  // order값이 같은 게 있으면(구버전 데이터, 전부 0 등) 원래 저장 순서를 유지하도록 안정 정렬
+  static List<GroupModel> getRealGroups() {
     final list = _gr.values.map((e) => GroupModel.fromMap(Map.from(e as Map))).toList();
-    // 구버전 데이터 호환: order 값이 없거나 중복돼 있으면(전부 0 등) 현재 순서 기준으로 순번을 새로 매겨 저장
-    final distinctOrders = list.map((g) => g.order).toSet();
-    if (distinctOrders.length != list.length) {
-      for (int i = 0; i < list.length; i++) {
-        if (list[i].order != i) {
-          final fixed = GroupModel(id: list[i].id, name: list[i].name, colorValue: list[i].colorValue, order: i);
-          _gr.put(fixed.id, fixed.toMap());
-          list[i] = fixed;
-        }
-      }
-    }
-    list.sort((a, b) => a.order.compareTo(b.order));
-    return list;
+    final indexed = list.asMap().entries.toList()
+      ..sort((e1, e2) {
+        final c = e1.value.order.compareTo(e2.value.order);
+        return c != 0 ? c : e1.key.compareTo(e2.key);
+      });
+    return indexed.map((e) => e.value).toList();
   }
   // 즐겨찾기 가상그룹을 맨 앞에 포함한 전체 그룹 목록 (선택/필터/표시용)
   static List<GroupModel> getGroups() => [kFavGroup, ...getRealGroups()];
@@ -216,21 +210,34 @@ static List<GroupModel> getRealGroups() {
     final list = getRealGroups();
     return list.isEmpty ? 0 : list.map((g) => g.order).reduce((a, b) => a > b ? a : b) + 1;
   }
+  // 순서 목록 전체를 0,1,2... 순번으로 다시 저장 (기존 order값 중복 여부와 상관없이 항상 확실하게 순번을 재배정)
+  static Future<void> _reassignOrders(List<GroupModel> orderedList) async {
+    for (int i = 0; i < orderedList.length; i++) {
+      final g = orderedList[i];
+      if (g.order != i) {
+        await saveGroup(GroupModel(id: g.id, name: g.name, colorValue: g.colorValue, order: i));
+      }
+    }
+  }
   static Future<void> moveGroupUp(String id) async {
     final list = getRealGroups();
     final idx = list.indexWhere((g) => g.id == id);
     if (idx <= 0) return;
-    final a = list[idx], b = list[idx - 1];
-    await saveGroup(GroupModel(id: a.id, name: a.name, colorValue: a.colorValue, order: b.order));
-    await saveGroup(GroupModel(id: b.id, name: b.name, colorValue: b.colorValue, order: a.order));
+    final newList = List<GroupModel>.from(list);
+    final tmp = newList[idx];
+    newList[idx] = newList[idx - 1];
+    newList[idx - 1] = tmp;
+    await _reassignOrders(newList);
   }
   static Future<void> moveGroupDown(String id) async {
     final list = getRealGroups();
     final idx = list.indexWhere((g) => g.id == id);
     if (idx == -1 || idx >= list.length - 1) return;
-    final a = list[idx], b = list[idx + 1];
-    await saveGroup(GroupModel(id: a.id, name: a.name, colorValue: a.colorValue, order: b.order));
-    await saveGroup(GroupModel(id: b.id, name: b.name, colorValue: b.colorValue, order: a.order));
+    final newList = List<GroupModel>.from(list);
+    final tmp = newList[idx];
+    newList[idx] = newList[idx + 1];
+    newList[idx + 1] = tmp;
+    await _reassignOrders(newList);
   }
 
   static List<AbbreviationModel> getAbbreviations() =>
@@ -2433,17 +2440,25 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
               _lbl('약어'),
               Focus(
                 onKeyEvent: (node, event) {
-                  if (event is KeyDownEvent &&
-                      event.logicalKey == LogicalKeyboardKey.tab &&
-                      HardwareKeyboard.instance.isAltPressed) {
-                    if (existing == null && i == rows.length - 1) {
-                      setS(() => addRow());
+                  if (event is KeyDownEvent) {
+                    final isShiftKey = event.logicalKey == LogicalKeyboardKey.shift ||
+                        event.logicalKey == LogicalKeyboardKey.shiftLeft ||
+                        event.logicalKey == LogicalKeyboardKey.shiftRight;
+                    final isAltKey = event.logicalKey == LogicalKeyboardKey.alt ||
+                        event.logicalKey == LogicalKeyboardKey.altLeft ||
+                        event.logicalKey == LogicalKeyboardKey.altRight;
+                    final altShiftCombo = (isShiftKey && HardwareKeyboard.instance.isAltPressed) ||
+                        (isAltKey && HardwareKeyboard.instance.isShiftPressed);
+                    if (altShiftCombo) {
+                      if (existing == null && i == rows.length - 1) {
+                        setS(() => addRow());
+                      }
+                      final targetIndex = i + 1;
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (targetIndex < wordFocusNodes.length) wordFocusNodes[targetIndex].requestFocus();
+                      });
+                      return KeyEventResult.handled;
                     }
-                    final targetIndex = i + 1;
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (targetIndex < wordFocusNodes.length) wordFocusNodes[targetIndex].requestFocus();
-                    });
-                    return KeyEventResult.handled;
                   }
                   return KeyEventResult.ignored;
                 },
@@ -2451,7 +2466,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
                   decoration: _inputDeco(''), textInputAction: TextInputAction.next),
               ),
               const SizedBox(height: 4),
-              Text('※ 띄어쓰기 → * 자동 변환  |  약어 입력 후 Alt+Tab → 초중종성 생략하고 다음 약어로', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+              Text('※ 띄어쓰기 → * 자동 변환  |  약어 입력 후 Alt+Shift → 초중종성 생략하고 다음 약어로', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2940,20 +2955,25 @@ class _RemindersScreenState extends State<RemindersScreen> {
   }
 
   void _editSelected(BuildContext context, List<ReminderModel> all) {
-    if (_selected.length != 1) return;
-    final r = all.firstWhere((r) => _selected.contains(r.id));
-    final targetCtrl = TextEditingController(text: r.target.replaceAll('*', ' '));
-    int interval = r.intervalDays;
-    bool repeat = r.repeat;
-    DateTime date = DateTime.tryParse(r.date) ?? DateTime.now();
+    if (_selected.isEmpty) return;
+    final selectedReminders = all.where((r) => _selected.contains(r.id)).toList();
+    final single = selectedReminders.length == 1;
+    final r0 = selectedReminders.first;
+    final targetCtrl = TextEditingController(text: single ? r0.target.replaceAll('*', ' ') : '');
+    int interval = r0.intervalDays;
+    bool repeat = r0.repeat;
+    DateTime date = DateTime.tryParse(r0.date) ?? DateTime.now();
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('리마인드 수정', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      title: Text(single ? '리마인드 수정' : '리마인드 일괄 수정 (${selectedReminders.length}개)',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _lbl(r.type == 'word' ? '약어' : '문장'),
-        TextField(controller: targetCtrl, maxLines: r.type == 'sentence' ? 3 : 1, decoration: _inputDeco('')),
-        const SizedBox(height: 12),
+        if (single) ...[
+          _lbl(r0.type == 'word' ? '약어' : '문장'),
+          TextField(controller: targetCtrl, maxLines: r0.type == 'sentence' ? 3 : 1, decoration: _inputDeco('')),
+          const SizedBox(height: 12),
+        ],
         _lbl('날짜'),
         GestureDetector(
           onTap: () async {
@@ -2981,17 +3001,94 @@ class _RemindersScreenState extends State<RemindersScreen> {
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () async {
-            final target = targetCtrl.text.trim();
-            if (target.isEmpty) return;
             final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-            await Store.saveReminder(ReminderModel(
-              id: r.id, type: r.type,
-              target: r.type == 'word' ? encodeWord(target) : target,
-              date: ds, intervalDays: interval, repeat: repeat, active: r.active));
+            if (single) {
+              final target = targetCtrl.text.trim();
+              if (target.isEmpty) return;
+              await Store.saveReminder(ReminderModel(
+                id: r0.id, type: r0.type,
+                target: r0.type == 'word' ? encodeWord(target) : target,
+                date: ds, intervalDays: interval, repeat: repeat, active: r0.active));
+            } else {
+              for (final r in selectedReminders) {
+                await Store.saveReminder(ReminderModel(
+                  id: r.id, type: r.type, target: r.target,
+                  date: ds, intervalDays: interval, repeat: repeat, active: r.active));
+              }
+            }
             if (ctx.mounted) Navigator.pop(ctx);
             setState(() { _selected.clear(); _selectMode = false; });
           }, child: const Text('저장')),
       ])));
+  }
+
+  // 선택된 리마인드(약어 유형)의 실제 약어들을 하나 이상의 그룹에 일괄 추가
+  void _groupifySelected(BuildContext context, List<ReminderModel> all) async {
+    final targets = all.where((r) => _selected.contains(r.id) && r.type == 'word').toList();
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('약어 리마인드만 그룹에 추가할 수 있어요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+      return;
+    }
+    final groups = Store.getGroups();
+    if (groups.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('먼저 그룹을 만들어 주세요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+      return;
+    }
+    final Set<String> checked = {};
+    final apply = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(
+      builder: (ctx, setS) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('그룹 추가 (중복 가능)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ...groups.map((g) => CheckboxListTile(
+            value: checked.contains(g.id),
+            activeColor: g.color,
+            secondary: CircleAvatar(backgroundColor: g.color, radius: 10),
+            title: Text(g.name),
+            onChanged: (v) => setS(() { if (v == true) checked.add(g.id); else checked.remove(g.id); }))),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(ctx, true), child: const Text('추가')),
+        ])));
+    if (apply != true || checked.isEmpty) return;
+    final abbrevs = Store.getAbbreviations();
+    for (final r in targets) {
+      AbbreviationModel? a;
+      try { a = abbrevs.firstWhere((x) => x.word == r.target); } catch (_) { a = null; }
+      if (a != null) {
+        final newIds = {...a.groupIds, ...checked}.toList();
+        await Store.saveAbbreviation(a.copyWith(groupIds: newIds));
+      }
+    }
+    if (context.mounted) {
+      setState(() { _selected.clear(); _selectMode = false; });
+    }
+  }
+
+  // 선택된 리마인드(약어 유형)의 실제 약어들로 바로 테스트 시작
+  void _testSelected(BuildContext context, List<ReminderModel> all) {
+    final targets = all.where((r) => _selected.contains(r.id) && r.type == 'word').toList();
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('약어 리마인드를 선택해주세요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+      return;
+    }
+    final abbrevs = Store.getAbbreviations();
+    final items = <AbbreviationModel>[];
+    for (final r in targets) {
+      try { items.add(abbrevs.firstWhere((x) => x.word == r.target)); } catch (_) {}
+    }
+    if (items.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('해당 약어를 찾을 수 없어요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+      return;
+    }
+    setState(() { _selected.clear(); _selectMode = false; });
+    Navigator.push(context, MaterialPageRoute(builder: (_) => QuizScreen(presetItems: items)));
   }
 
   @override
@@ -3002,36 +3099,44 @@ class _RemindersScreenState extends State<RemindersScreen> {
         return Scaffold(backgroundColor: Colors.white,
           body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
-              child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  const Text('리마인드', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                  Text('${reminders.length}개', style: const TextStyle(fontSize: 13, color: Colors.grey)),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                  Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('리마인드', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+                    Text('${reminders.length}개', style: const TextStyle(fontSize: 13, color: Colors.grey)),
+                  ]),
+                  if (!_selectMode) ...[
+                    Row(children: [
+                      GestureDetector(onTap: _toggleSelectMode,
+                        child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          margin: const EdgeInsets.only(right: 8),
+                          decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
+                          child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
+                      ElevatedButton.icon(onPressed: () => _showAddReminderDialog(context),
+                        icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
+                        style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
+                    ]),
+                  ],
                 ]),
-                Row(children: [
-                  if (_selectMode) ...[
-                    if (_selected.length == 1) ...[
+                if (_selectMode) ...[
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    if (_selected.isNotEmpty) ...[
                       GestureDetector(onTap: () => _editSelected(context, reminders),
                         child: _actionChip(Icons.edit_rounded, '수정', kBlueSky)),
-                      const SizedBox(width: 6),
+                      GestureDetector(onTap: () => _groupifySelected(context, reminders),
+                        child: _actionChip(Icons.label_rounded, '그룹화', kPurple)),
+                      GestureDetector(onTap: () => _testSelected(context, reminders),
+                        child: _actionChip(Icons.quiz_rounded, '테스트', kBlueDark)),
                     ],
                     GestureDetector(onTap: () => _bulkDelete(context, reminders),
                       child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
-                    const SizedBox(width: 6),
                     GestureDetector(onTap: _toggleSelectMode,
                       child: _actionChip(Icons.close, '취소', Colors.grey)),
-                  ] else ...[
-                    GestureDetector(onTap: _toggleSelectMode,
-                      child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        margin: const EdgeInsets.only(right: 8),
-                        decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                        child: const Icon(Icons.checklist_rounded, size: 16, color: kBlue))),
-                    ElevatedButton.icon(onPressed: () => _showAddReminderDialog(context),
-                      icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
-                      style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6))),
-                  ],
-                ]),
+                  ]),
+                ],
               ])),
             if (_selectMode)
               Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
@@ -3107,9 +3212,14 @@ class _RemindersScreenState extends State<RemindersScreen> {
     int interval = 1; bool repeat = false;
     String type = 'word'; String? selectedTarget;
     final customCtrl = TextEditingController(); bool useCustom = false;
+    final pickerSearchCtrl = TextEditingController();
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
       final abbrevs = Store.getAbbreviations(); final sentences = Store.getSentences();
-      final items = type == 'word' ? abbrevs.map((a) => a.displayWord).toList() : sentences.map((s) => s.text).toList();
+      var items = type == 'word' ? abbrevs.map((a) => a.displayWord).toList() : sentences.map((s) => s.text).toList();
+      final q = pickerSearchCtrl.text.trim();
+      if (q.isNotEmpty) {
+        items = items.where((t) => t.replaceAll('*', ' ').contains(q) || t.contains(q)).toList();
+      }
       return AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('리마인드 추가', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -3128,11 +3238,16 @@ class _RemindersScreenState extends State<RemindersScreen> {
           ]),
           const SizedBox(height: 12),
           _lbl(type == 'word' ? '약어 선택' : '문장 선택'),
+          TextField(controller: pickerSearchCtrl, onChanged: (_) => setS(() {}),
+            decoration: _inputDeco('검색...').copyWith(
+              prefixIcon: const Icon(Icons.search, size: 18, color: Colors.grey),
+              isDense: true, contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8))),
+          const SizedBox(height: 8),
           if (items.isEmpty)
             Padding(padding: const EdgeInsets.only(bottom: 8),
-                child: Text(type == 'word' ? '등록된 약어가 없습니다' : '등록된 문장이 없습니다',
+                child: Text(q.isNotEmpty ? '검색 결과가 없습니다' : (type == 'word' ? '등록된 약어가 없습니다' : '등록된 문장이 없습니다'),
                     style: const TextStyle(color: Colors.grey, fontSize: 12)))
-          else Container(height: 120,
+          else Container(height: 280,
             decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE0E0E0)), borderRadius: BorderRadius.circular(8)),
             child: ListView.builder(itemCount: items.length, itemBuilder: (_, i) {
               final item = items[i]; final isSel = selectedTarget == item;
@@ -3257,7 +3372,8 @@ void _showBulkReminderDialog(BuildContext context, List<String> targets, String 
 
 // ── 퀴즈 화면 ────────────────────────────────────────────────────────
 class QuizScreen extends StatefulWidget {
-  const QuizScreen({super.key});
+  final List<AbbreviationModel>? presetItems;
+  const QuizScreen({super.key, this.presetItems});
   @override State<QuizScreen> createState() => _QuizScreenState();
 }
 
@@ -3283,6 +3399,14 @@ class _QuizScreenState extends State<QuizScreen> {
   final _keyboardFocusNode = FocusNode();
 
   @override
+  void initState() {
+    super.initState();
+    if (widget.presetItems != null && widget.presetItems!.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _start());
+    }
+  }
+
+  @override
   void dispose() {
     _answerCtrl.dispose();
     _inputFocusNode.dispose();
@@ -3292,6 +3416,11 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   List<dynamic> _buildQuestions() {
+    if (widget.presetItems != null && widget.presetItems!.isNotEmpty) {
+      final list = List<dynamic>.from(widget.presetItems!);
+      list.shuffle();
+      return list;
+    }
     final abbrevs = Store.getAbbreviations();
     final sentences = Store.getSentences();
     List<dynamic> pool = [];
