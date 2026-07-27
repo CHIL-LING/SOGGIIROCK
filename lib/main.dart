@@ -987,16 +987,17 @@ void _checkTodayReminders() {
     final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
     if (reminders.isEmpty) return;
     final abbrevs = Store.getAbbreviations();
-    for (final r in reminders) {
-      if (r.repeat) {
-        final next = DateTime.now().add(Duration(days: r.intervalDays));
-        final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
-        Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target, date: ds,
-          intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
-      }
-    }
     showDialog(context: context, barrierDismissible: true,
-        builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs, todayKey: today));
+        builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs, todayKey: today))
+      .then((_) {
+        // 오늘 다시 보지 않음을 누르지 않은 경우(X or 바깥클릭), 30초 후 다시 알림
+        final stillNotDismissed = settingsBox.get(dismissedKey) != true;
+        if (stillNotDismissed && mounted) {
+          Future.delayed(const Duration(seconds: 30), () {
+            if (mounted) _checkTodayReminders();
+          });
+        }
+      });
   }
   String _todayStr() {
     final now = DateTime.now();
@@ -1059,6 +1060,14 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
               ]),
               TextButton.icon(
                 onPressed: () {
+                  for (final r in widget.reminders) {
+                    if (r.repeat) {
+                      final next = DateTime.now().add(Duration(days: r.intervalDays));
+                      final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
+                      Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target, date: ds,
+                        intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
+                    }
+                  }
                   Hive.box('settings').put('_dismissed_${widget.todayKey}', true);
                   Navigator.pop(context);
                 },
