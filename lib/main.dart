@@ -966,37 +966,68 @@ class MainShell extends StatefulWidget {
   const MainShell({super.key});
   @override State<MainShell> createState() => _MainShellState();
 }
-class _MainShellState extends State<MainShell> {
+class _MainShellState extends State<MainShell> with SingleTickerProviderStateMixin {
   int _idx = 0;
-final _screens = const [
+  bool _hasReminder = false;
+  late AnimationController _blinkCtrl;
+  late Animation<double> _blinkAnim;
+
+  final _screens = const [
     HomeScreen(), SentenceAnalyzerScreen(), SearchScreen(),
     SentenceRegisterScreen(), RemindersScreen(), QuizScreen(),
   ];
   @override
   void initState() {
     super.initState();
+    _blinkCtrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 800))
+      ..repeat(reverse: true);
+    _blinkAnim = Tween<double>(begin: 0.4, end: 1.0).animate(_blinkCtrl);
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkTodayReminders());
+  }
+
+  @override
+  void dispose() {
+    _blinkCtrl.dispose();
+    super.dispose();
   }
 void _checkTodayReminders() {
     final today = _todayStr();
-
+    final now = DateTime.now();
+    final todayDate = DateTime(now.year, now.month, now.day);
     final settingsBox = Hive.box('settings');
     final dismissedKey = '_dismissed_$today';
+
+    // 2,3번 조건: 오늘보다 이전 날짜인 리마인드는 자동으로 다음 주기로 넘기기
+    for (final r in Store.getReminders()) {
+      if (!r.active) continue;
+      final d = DateTime.tryParse(r.date);
+      if (d == null) continue;
+      if (d.isBefore(todayDate)) {
+        // 다음 주기로 넘기기
+        var next = d;
+        while (!next.isAfter(todayDate.subtract(const Duration(days: 1)))) {
+          next = next.add(Duration(days: r.intervalDays));
+        }
+        final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
+        Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target,
+            date: ds, intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
+      }
+    }
+
+    // 오늘 "다시 보지 않음"을 이미 눌렀으면 팝업 없음
     if (settingsBox.get(dismissedKey) == true) return;
 
+    // 오늘 날짜인 리마인드만 팝업
     final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
     if (reminders.isEmpty) return;
     final abbrevs = Store.getAbbreviations();
+
     showDialog(context: context, barrierDismissible: true,
         builder: (_) => _TodayReminderDialog(reminders: reminders, abbrevs: abbrevs, todayKey: today))
       .then((_) {
-        // 오늘 다시 보지 않음을 누르지 않은 경우(X or 바깥클릭), 30초 후 다시 알림
-        final stillNotDismissed = settingsBox.get(dismissedKey) != true;
-        if (stillNotDismissed && mounted) {
-          Future.delayed(const Duration(seconds: 30), () {
-            if (mounted) _checkTodayReminders();
-          });
-        }
+        if (!mounted) return;
+        final dismissed = settingsBox.get(dismissedKey) == true;
+        setState(() => _hasReminder = !dismissed);
       });
   }
   String _todayStr() {
@@ -1005,25 +1036,51 @@ void _checkTodayReminders() {
     return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
   }
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: IndexedStack(index: _idx, children: _screens),
-    bottomNavigationBar: SafeArea(child: Container(
-      decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFFF0F0F0)))),
-      child: BottomNavigationBar(
-        currentIndex: _idx, onTap: (i) => setState(() => _idx = i),
-        selectedItemColor: kBlue, unselectedItemColor: Colors.grey,
-        showUnselectedLabels: true, type: BottomNavigationBarType.fixed,
-        selectedFontSize: 10, unselectedFontSize: 10,
-        selectedIconTheme: const IconThemeData(size: 24),
-        unselectedIconTheme: const IconThemeData(size: 24),
-        items: const [
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.home_rounded)), label: '홈'),
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.search_rounded)), label: '약어확인'),
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.menu_book_rounded)), label: '약어검색'),
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
-          BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
-        ]))));
+  Widget build(BuildContext context) {
+    final today = _todayStr();
+    final reminders = Store.getReminders().where((r) => r.active && r.date == today).toList();
+    final abbrevs = Store.getAbbreviations();
+    return Scaffold(
+      body: Stack(children: [
+        IndexedStack(index: _idx, children: _screens),
+        if (_hasReminder)
+          Positioned(top: 48, left: 16,
+            child: GestureDetector(
+              onTap: () {
+                showDialog(context: context, barrierDismissible: true,
+                    builder: (_) => _TodayReminderDialog(
+                        reminders: reminders, abbrevs: abbrevs, todayKey: today))
+                  .then((_) {
+                    if (!mounted) return;
+                    final dismissed = Hive.box('settings').get('_dismissed_$today') == true;
+                    setState(() => _hasReminder = !dismissed);
+                  });
+              },
+              child: FadeTransition(opacity: _blinkAnim,
+                child: Container(width: 44, height: 44,
+                  decoration: BoxDecoration(
+                    color: kBlue, shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: kBlue.withOpacity(0.4), blurRadius: 8, spreadRadius: 2)]),
+                  child: const Icon(Icons.notifications_rounded, color: Colors.white, size: 22))))),
+      ]),
+      bottomNavigationBar: SafeArea(child: Container(
+        decoration: const BoxDecoration(border: Border(top: BorderSide(color: Color(0xFFF0F0F0)))),
+        child: BottomNavigationBar(
+          currentIndex: _idx, onTap: (i) => setState(() => _idx = i),
+          selectedItemColor: kBlue, unselectedItemColor: Colors.grey,
+          showUnselectedLabels: true, type: BottomNavigationBarType.fixed,
+          selectedFontSize: 10, unselectedFontSize: 10,
+          selectedIconTheme: const IconThemeData(size: 24),
+          unselectedIconTheme: const IconThemeData(size: 24),
+          items: const [
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.home_rounded)), label: '홈'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.search_rounded)), label: '약어확인'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.menu_book_rounded)), label: '약어검색'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
+          ]))));
+  }
 }
 
 class _TodayReminderDialog extends StatefulWidget {
@@ -1061,12 +1118,10 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
               TextButton.icon(
                 onPressed: () {
                   for (final r in widget.reminders) {
-                    if (r.repeat) {
-                      final next = DateTime.now().add(Duration(days: r.intervalDays));
-                      final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
-                      Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target, date: ds,
-                        intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
-                    }
+                    final next = DateTime.now().add(Duration(days: r.intervalDays));
+                    final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
+                    Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target, date: ds,
+                      intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
                   }
                   Hive.box('settings').put('_dismissed_${widget.todayKey}', true);
                   Navigator.pop(context);
@@ -3385,7 +3440,7 @@ class QuizScreen extends StatefulWidget {
 class _QuizScreenState extends State<QuizScreen> {
   // 설정
   String _mode = 'abbr'; // 'abbr' or 'sentence'
-  String? _filterGroupId;
+  final Set<String> _filterGroupIds = {};
   int _quizCount = 10;
   
   // 퀴즈 진행
@@ -3431,8 +3486,8 @@ class _QuizScreenState extends State<QuizScreen> {
     List<dynamic> pool = [];
     if (_mode == 'abbr' || _mode == 'both') {
       var filtered = abbrevs;
-      if (_filterGroupId != null) {
-        filtered = abbrevs.where((a) => a.groupIds.contains(_filterGroupId)).toList();
+      if (_filterGroupIds.isNotEmpty) {
+        filtered = abbrevs.where((a) => a.groupIds.any((id) => _filterGroupIds.contains(id))).toList();
       }
       pool.addAll(filtered);
     }
@@ -3738,11 +3793,11 @@ Widget _buildSetup() {
         // 모드 선택
         _lbl('테스트 유형'),
         Row(children: [
-          _ModeChip(label: '약어', value: 'abbr', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+          _ModeChip(label: '약어', value: 'abbr', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupIds.clear(); })),
           const SizedBox(width: 8),
-          _ModeChip(label: '문장', value: 'sentence', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+          _ModeChip(label: '문장', value: 'sentence', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupIds.clear(); })),
           const SizedBox(width: 8),
-          _ModeChip(label: '둘 다', value: 'both', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupId = null; })),
+          _ModeChip(label: '둘 다', value: 'both', selected: _mode, onTap: (v) => setState(() { _mode = v; _filterGroupIds.clear(); })),
         ]),
         const SizedBox(height: 20),
 
@@ -3751,29 +3806,35 @@ Widget _buildSetup() {
           _lbl('그룹 필터'),
           Wrap(spacing: 8, runSpacing: 8, children: [
             GestureDetector(
-              onTap: () => setState(() => _filterGroupId = null),
+              onTap: () => setState(() => _filterGroupIds.clear()),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
-                  color: _filterGroupId == null ? kBlue : kBlueLight,
+                  color: _filterGroupIds.isEmpty ? kBlue : kBlueLight,
                   borderRadius: BorderRadius.circular(20)),
                 child: Text('전체', style: TextStyle(
-                    color: _filterGroupId == null ? Colors.white : kBlue,
+                    color: _filterGroupIds.isEmpty ? Colors.white : kBlue,
                     fontWeight: FontWeight.w700, fontSize: 12)))),
-            ...groups.map((g) => GestureDetector(
-              onTap: () => setState(() => _filterGroupId = g.id),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _filterGroupId == g.id ? g.color : kBlueLight,
-                  borderRadius: BorderRadius.circular(20)),
-                child: Row(mainAxisSize: MainAxisSize.min, children: [
-                  CircleAvatar(backgroundColor: _filterGroupId == g.id ? Colors.white : g.color, radius: 5),
-                  const SizedBox(width: 5),
-                  Text(g.name, style: TextStyle(
-                      color: _filterGroupId == g.id ? Colors.white : g.color,
-                      fontWeight: FontWeight.w700, fontSize: 12)),
-                ])))),
+            ...groups.map((g) {
+              final selected = _filterGroupIds.contains(g.id);
+              return GestureDetector(
+                onTap: () => setState(() {
+                  if (selected) _filterGroupIds.remove(g.id);
+                  else _filterGroupIds.add(g.id);
+                }),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: selected ? g.color : kBlueLight,
+                    borderRadius: BorderRadius.circular(20)),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    CircleAvatar(backgroundColor: selected ? Colors.white : g.color, radius: 5),
+                    const SizedBox(width: 5),
+                    Text(g.name, style: TextStyle(
+                        color: selected ? Colors.white : g.color,
+                        fontWeight: FontWeight.w700, fontSize: 12)),
+                  ])));
+            }),
           ]),
           const SizedBox(height: 20),
         ],
