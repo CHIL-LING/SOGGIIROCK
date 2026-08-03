@@ -1772,12 +1772,21 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                 keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  TextField(controller: _analyzerCtrl, focusNode: _focusNode,
+                  Focus(onKeyEvent: (node, event) {
+                    if (event is KeyDownEvent &&
+                        (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
+                        HardwareKeyboard.instance.isControlPressed) {
+                      setState(() => _analyzerAnalyzed = true);
+                      return KeyEventResult.handled;
+                    }
+                    return KeyEventResult.ignored;
+                  },
+                  child: TextField(controller: _analyzerCtrl, focusNode: _focusNode,
                     minLines: _analyzerAnalyzed ? 3 : 10, maxLines: _analyzerAnalyzed ? 3 : 10,
                     onChanged: (_) => setState(() => _analyzerAnalyzed = false),
-                    decoration: InputDecoration(hintText: '분석할 문장을 입력하세요...',
+                    decoration: InputDecoration(hintText: '분석할 문장을 입력하세요... (Ctrl+Enter로 분석)',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue)))),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue))))),
                   const SizedBox(height: 10),
                   SizedBox(width: double.infinity, child: ElevatedButton(
                     onPressed: () => setState(() => _analyzerAnalyzed = true),
@@ -2062,27 +2071,88 @@ class _SearchScreenState extends State<SearchScreen> {
         const SnackBar(content: Text('먼저 그룹을 만들어 주세요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
       return;
     }
-    final Set<String> checked = {};
+    final selected = all.where((a) => _selected.contains(a.id)).toList();
+
+    // 각 그룹의 초기 상태 계산: all=☑, some=➖, none=☐
+    // 0 = none, 1 = some, 2 = all
+    Map<String, int> groupState = {};
+    for (final g in groups) {
+      final count = selected.where((a) => a.groupIds.contains(g.id)).length;
+      groupState[g.id] = count == 0 ? 0 : (count == selected.length ? 2 : 1);
+    }
+    // 편집 중인 상태 (null=변경없음, true=추가, false=해제)
+    Map<String, bool?> changes = {};
+    final focusNode = FocusNode();
+
     final apply = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setS) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('그룹 추가 (중복 가능)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ...groups.map((g) => CheckboxListTile(
-            value: checked.contains(g.id),
-            activeColor: g.color,
-            secondary: CircleAvatar(backgroundColor: g.color, radius: 10),
-            title: Text(g.name),
-            onChanged: (v) => setS(() { if (v == true) checked.add(g.id); else checked.remove(g.id); }))),
-        ])),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(ctx, true), child: const Text('추가')),
-        ])));
-    if (apply != true || checked.isEmpty) return;
-    for (final a in all.where((a) => _selected.contains(a.id))) {
-      final newIds = {...a.groupIds, ...checked}.toList();
+      builder: (ctx, setS) {
+        void doSave() async {
+          final hasChange = changes.values.any((v) => v != null);
+          if (!hasChange) { Navigator.pop(ctx, false); return; }
+          final ok = await showDialog<bool>(context: ctx, builder: (c2) => AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: const Text('변경사항 저장', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            content: const Text('그룹 설정을 변경할까요?'),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(c2, true), child: const Text('저장')),
+            ]));
+          if (ctx.mounted) Navigator.pop(ctx, ok == true);
+        }
+        return KeyboardListener(
+          focusNode: focusNode,
+          autofocus: true,
+          onKeyEvent: (e) {
+            if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.enter) doSave();
+          },
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            title: Text('그룹 추가/해제 (${selected.length}개 약어)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
+              ...groups.map((g) {
+                final cur = changes[g.id];
+                // 현재 표시 상태 결정
+                int displayState;
+                if (cur == true) displayState = 2;
+                else if (cur == false) displayState = 0;
+                else displayState = groupState[g.id]!;
+
+                return ListTile(
+                  leading: CircleAvatar(backgroundColor: g.color, radius: 12,
+                    child: Text(g.name[0], style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700))),
+                  title: Text(g.name),
+                  trailing: GestureDetector(
+                    onTap: () => setS(() {
+                      if (displayState == 2) changes[g.id] = false;      // ☑ → ☐
+                      else if (displayState == 1) changes[g.id] = true;  // ➖ → ☑
+                      else changes[g.id] = true;                          // ☐ → ☑
+                    }),
+                    child: Container(width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: displayState == 2 ? g.color : displayState == 1 ? g.color.withOpacity(0.3) : Colors.transparent,
+                        border: Border.all(color: displayState == 0 ? Colors.grey.shade400 : g.color, width: 2),
+                        borderRadius: BorderRadius.circular(6)),
+                      child: Center(child: displayState == 2
+                        ? const Icon(Icons.check, color: Colors.white, size: 16)
+                        : displayState == 1
+                          ? Icon(Icons.remove, color: g.color, size: 16)
+                          : null))));
+              }),
+            ])),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: doSave, child: const Text('저장')),
+            ]));
+      }));
+    if (apply != true) return;
+    for (final a in selected) {
+      var newIds = List<String>.from(a.groupIds);
+      for (final entry in changes.entries) {
+        if (entry.value == true && !newIds.contains(entry.key)) newIds.add(entry.key);
+        if (entry.value == false) newIds.remove(entry.key);
+      }
       await Store.saveAbbreviation(a.copyWith(groupIds: newIds));
     }
     setState(() { _selected.clear(); _selectMode = false; });
@@ -2459,7 +2529,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         ],
       ]);
 
-      return AlertDialog(
+      return _EnterToConfirm(onConfirm: saveAll, child: AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Text(existing != null ? '약어 수정' : '약어 추가',
@@ -2550,7 +2620,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
             onPressed: saveAll, child: const Text('저장')),
-        ]);
+        ]));
     }));
 }
 
@@ -2612,35 +2682,38 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
   void _showGroupEditDialog(BuildContext context, {GroupModel? existing}) {
     final nameCtrl = TextEditingController(text: existing?.name ?? '');
     Color selectedColor = existing != null ? existing.color : kGroupColors[0];
-    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: Text(existing == null ? '그룹 추가' : '그룹 수정',
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        _lbl('그룹 이름'),
-        TextField(controller: nameCtrl, decoration: _inputDeco('그룹 이름 입력')),
-        const SizedBox(height: 14),
-        _lbl('색상'),
-        Wrap(spacing: 8, runSpacing: 8, children: kGroupColors.map((c) => GestureDetector(
-          onTap: () => setS(() => selectedColor = c),
-          child: Container(width: 32, height: 32,
-            decoration: BoxDecoration(color: c, shape: BoxShape.circle,
-              border: Border.all(color: selectedColor.value == c.value ? Colors.black : Colors.transparent, width: 2.5)),
-            child: selectedColor.value == c.value ? const Icon(Icons.check, color: Colors.white, size: 16) : null))).toList()),
-      ]),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-          onPressed: () async {
-            final name = nameCtrl.text.trim();
-            if (name.isEmpty) return;
-            await Store.saveGroup(GroupModel(
-              id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-              name: name, colorValue: selectedColor.value,
-              order: existing?.order ?? Store.nextGroupOrder()));
-            if (ctx.mounted) Navigator.pop(ctx);
-          }, child: const Text('저장')),
-      ])));
+    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+      Future<void> doSave() async {
+        final name = nameCtrl.text.trim();
+        if (name.isEmpty) return;
+        await Store.saveGroup(GroupModel(
+          id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
+          name: name, colorValue: selectedColor.value,
+          order: existing?.order ?? Store.nextGroupOrder()));
+        if (ctx.mounted) Navigator.pop(ctx);
+      }
+      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(existing == null ? '그룹 추가' : '그룹 수정',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          _lbl('그룹 이름'),
+          TextField(controller: nameCtrl, decoration: _inputDeco('그룹 이름 입력')),
+          const SizedBox(height: 14),
+          _lbl('색상'),
+          Wrap(spacing: 8, runSpacing: 8, children: kGroupColors.map((c) => GestureDetector(
+            onTap: () => setS(() => selectedColor = c),
+            child: Container(width: 32, height: 32,
+              decoration: BoxDecoration(color: c, shape: BoxShape.circle,
+                border: Border.all(color: selectedColor.value == c.value ? Colors.black : Colors.transparent, width: 2.5)),
+              child: selectedColor.value == c.value ? const Icon(Icons.check, color: Colors.white, size: 16) : null))).toList()),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            onPressed: doSave, child: const Text('저장')),
+        ]));
+    }));
   }
 
   void _confirmDeleteGroup(BuildContext context, GroupModel g) {
@@ -2891,10 +2964,19 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
                         style: const TextStyle(fontSize: 12, color: Colors.grey))),
                 ])),
             Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Column(children: [
-              TextField(controller: _ctrl, focusNode: _focusNode, maxLines: 3,
-                decoration: InputDecoration(hintText: '복습할 문장을 입력하세요...',
+              Focus(onKeyEvent: (node, event) {
+                if (event is KeyDownEvent &&
+                    (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
+                    HardwareKeyboard.instance.isControlPressed) {
+                  _save(context);
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              child: TextField(controller: _ctrl, focusNode: _focusNode, maxLines: 3,
+                decoration: InputDecoration(hintText: '복습할 문장을 입력하세요... (Ctrl+Enter로 저장)',
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue)))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue))))),
               const SizedBox(height: 8),
               SizedBox(width: double.infinity, child: ElevatedButton(onPressed: () => _save(context),
                 style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
@@ -3014,62 +3096,65 @@ class _RemindersScreenState extends State<RemindersScreen> {
     bool repeat = r0.repeat;
     DateTime date = DateTime.tryParse(r0.date) ?? DateTime.now();
 
-    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: Text(single ? '리마인드 수정' : '리마인드 일괄 수정 (${selectedReminders.length}개)',
-          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        if (single) ...[
-          _lbl(r0.type == 'word' ? '약어' : '문장'),
-          TextField(controller: targetCtrl, maxLines: r0.type == 'sentence' ? 3 : 1, decoration: _inputDeco('')),
+    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+      Future<void> doSave() async {
+        final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+        if (single) {
+          final target = targetCtrl.text.trim();
+          if (target.isEmpty) return;
+          await Store.saveReminder(ReminderModel(
+            id: r0.id, type: r0.type,
+            target: r0.type == 'word' ? encodeWord(target) : target,
+            date: ds, intervalDays: interval, repeat: repeat, active: r0.active));
+        } else {
+          for (final r in selectedReminders) {
+            await Store.saveReminder(ReminderModel(
+              id: r.id, type: r.type, target: r.target,
+              date: ds, intervalDays: interval, repeat: repeat, active: r.active));
+          }
+        }
+        if (ctx.mounted) Navigator.pop(ctx);
+        setState(() { _selected.clear(); _selectMode = false; });
+      }
+      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(single ? '리마인드 수정' : '리마인드 일괄 수정 (${selectedReminders.length}개)',
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          if (single) ...[
+            _lbl(r0.type == 'word' ? '약어' : '문장'),
+            TextField(controller: targetCtrl, maxLines: r0.type == 'sentence' ? 3 : 1, decoration: _inputDeco('')),
+            const SizedBox(height: 12),
+          ],
+          _lbl('날짜'),
+          GestureDetector(
+            onTap: () async {
+              final picked = await showDatePicker(
+                context: context, initialDate: date,
+                firstDate: DateTime.now().subtract(const Duration(days: 365)),
+                lastDate: DateTime.now().add(const Duration(days: 365 * 2)));
+              if (picked != null) setS(() => date = picked);
+            },
+            child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE0E0E0)), borderRadius: BorderRadius.circular(8)),
+              child: Row(children: [
+                const Icon(Icons.calendar_today_rounded, size: 16, color: kBlue),
+                const SizedBox(width: 8),
+                Text('${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}',
+                    style: const TextStyle(fontSize: 14)),
+              ]))),
           const SizedBox(height: 12),
-        ],
-        _lbl('날짜'),
-        GestureDetector(
-          onTap: () async {
-            final picked = await showDatePicker(
-              context: context, initialDate: date,
-              firstDate: DateTime.now().subtract(const Duration(days: 365)),
-              lastDate: DateTime.now().add(const Duration(days: 365 * 2)));
-            if (picked != null) setS(() => date = picked);
-          },
-          child: Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: BoxDecoration(border: Border.all(color: const Color(0xFFE0E0E0)), borderRadius: BorderRadius.circular(8)),
-            child: Row(children: [
-              const Icon(Icons.calendar_today_rounded, size: 16, color: kBlue),
-              const SizedBox(width: 8),
-              Text('${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}',
-                  style: const TextStyle(fontSize: 14)),
-            ]))),
-        const SizedBox(height: 12),
-        _lbl('간격'),
-        _IntervalRepeatPicker(interval: interval, repeat: repeat,
-          onIntervalChanged: (v) => setS(() => interval = v),
-          onRepeatChanged: (v) => setS(() => repeat = v)),
-      ])),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-          onPressed: () async {
-            final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-            if (single) {
-              final target = targetCtrl.text.trim();
-              if (target.isEmpty) return;
-              await Store.saveReminder(ReminderModel(
-                id: r0.id, type: r0.type,
-                target: r0.type == 'word' ? encodeWord(target) : target,
-                date: ds, intervalDays: interval, repeat: repeat, active: r0.active));
-            } else {
-              for (final r in selectedReminders) {
-                await Store.saveReminder(ReminderModel(
-                  id: r.id, type: r.type, target: r.target,
-                  date: ds, intervalDays: interval, repeat: repeat, active: r.active));
-              }
-            }
-            if (ctx.mounted) Navigator.pop(ctx);
-            setState(() { _selected.clear(); _selectMode = false; });
-          }, child: const Text('저장')),
-      ])));
+          _lbl('간격'),
+          _IntervalRepeatPicker(interval: interval, repeat: repeat,
+            onIntervalChanged: (v) => setS(() => interval = v),
+            onRepeatChanged: (v) => setS(() => repeat = v)),
+        ])),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            onPressed: doSave, child: const Text('저장')),
+        ]));
+    }));
   }
 
   // 선택된 리마인드(약어 유형)의 실제 약어들을 하나 이상의 그룹에 일괄 추가
@@ -3475,6 +3560,24 @@ class _QuizScreenState extends State<QuizScreen> {
     super.dispose();
   }
 
+  // 현재 모드/그룹 기준으로 중복 없는 전체 풀 개수 반환
+  int _totalPoolCount() {
+    final abbrevs = Store.getAbbreviations();
+    final sentences = Store.getSentences();
+    final Set<String> ids = {};
+    if (_mode == 'abbr' || _mode == 'both') {
+      var filtered = abbrevs;
+      if (_filterGroupIds.isNotEmpty) {
+        filtered = abbrevs.where((a) => a.groupIds.any((id) => _filterGroupIds.contains(id))).toList();
+      }
+      for (final a in filtered) ids.add(a.id);
+    }
+    if (_mode == 'sentence' || _mode == 'both') {
+      for (final s in sentences) ids.add(s.id);
+    }
+    return ids.length;
+  }
+
   List<dynamic> _buildQuestions() {
     if (widget.presetItems != null && widget.presetItems!.isNotEmpty) {
       final list = List<dynamic>.from(widget.presetItems!);
@@ -3712,7 +3815,13 @@ Widget _buildSetup() {
             const SizedBox(height: 8),
             Row(mainAxisSize: MainAxisSize.min, children: [
               GestureDetector(
-                onTap: () => setState(() => _quizCount = (_quizCount - 1).clamp(1, 9999)),
+                onTap: () => setState(() {
+                  if (_quizCount <= 1) {
+                    _quizCount = _totalPoolCount();
+                  } else {
+                    _quizCount = _quizCount - 1;
+                  }
+                }),
                 child: Container(width: 36, height: 36,
                   decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
                   child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
