@@ -277,6 +277,32 @@ class Store {
   }
 
   static Box get _qw => Hive.box('quizWrongLog');
+  // 연속 정답 추적: 특정 약어를 연속으로 맞춘 횟수 저장/조회/초기화
+  static Future<void> logQuizCorrect(String text) async {
+    final box = Hive.box('settings');
+    final key = '_streak_${text.hashCode}';
+    final cur = box.get(key, defaultValue: 0) as int;
+    await box.put(key, cur + 1);
+  }
+  static int getStreak(String text) {
+    return Hive.box('settings').get('_streak_${text.hashCode}', defaultValue: 0) as int;
+  }
+  static Future<void> resetStreak(String text) async {
+    await Hive.box('settings').put('_streak_${text.hashCode}', 0);
+  }
+  // 오늘 테스트 정답률 기록
+  static Future<void> logTodayQuizResult(int correct, int total) async {
+    final box = Hive.box('settings');
+    final today = DateTime.now();
+    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
+    await box.put(key, {'correct': correct, 'total': total, 'ts': today.toIso8601String()});
+  }
+  static Map<String, dynamic>? getTodayQuizResult() {
+    final today = DateTime.now();
+    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
+    final v = Hive.box('settings').get(key);
+    return v != null ? Map<String, dynamic>.from(v as Map) : null;
+  }
   // 테스트에서 틀렸을 때 항목 전체 텍스트를 기록 (역대 오답 통계용)
   static Future<void> logQuizWrong(String text) =>
       _qw.add({'text': text, 'ts': DateTime.now().toIso8601String()});
@@ -1390,6 +1416,79 @@ class _HomeScreenState extends State<HomeScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7)),
                         child: const Text('기록 추가', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
                     ]))),
+            const SizedBox(height: 10),
+            // 오늘 테스트 정답률 카드
+            Builder(builder: (_) {
+              final result = Store.getTodayQuizResult();
+              if (result == null) return const SizedBox();
+              final correct = result['correct'] as int;
+              final total = result['total'] as int;
+              final pct = total == 0 ? 0 : (correct * 100 / total).round();
+              return Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: pct >= 80 ? const Color(0xFFE8F5E9) : pct >= 60 ? const Color(0xFFFFF8E1) : const Color(0xFFFFEBEE),
+                    borderRadius: BorderRadius.circular(16)),
+                  child: Row(children: [
+                    Icon(pct >= 80 ? Icons.emoji_events_rounded : pct >= 60 ? Icons.trending_up_rounded : Icons.refresh_rounded,
+                        color: pct >= 80 ? Colors.green : pct >= 60 ? Colors.orange : Colors.red, size: 28),
+                    const SizedBox(width: 12),
+                    Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('오늘 테스트', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      Text('$pct% 정답  ($correct/$total)',
+                          style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900,
+                              color: pct >= 80 ? Colors.green.shade700 : pct >= 60 ? Colors.orange.shade700 : Colors.red.shade700)),
+                    ]),
+                  ])));
+            }),
+            const SizedBox(height: 10),
+            // 이번 주 많이 틀린 TOP5
+            Builder(builder: (_) {
+              final wrong = Store.getRecentWrongCounts(days: 7).entries.toList()
+                ..sort((a, b) => b.value.compareTo(a.value));
+              final top5 = wrong.take(5).toList();
+              if (top5.isEmpty) return const SizedBox();
+              return Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: const Color(0xFFFFF3F3), borderRadius: BorderRadius.circular(16)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    const Text('이번 주 많이 틀린 약어 TOP5', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.red)),
+                    const SizedBox(height: 8),
+                    ...top5.asMap().entries.map((e) => Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Row(children: [
+                        Container(width: 20, height: 20, decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(6)),
+                          child: Center(child: Text('${e.key+1}', style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)))),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(e.value.key, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
+                        Text('${e.value.value}번', style: const TextStyle(fontSize: 12, color: Colors.red)),
+                      ]))),
+                  ])));
+            }),
+            const SizedBox(height: 10),
+            // 연속 정답 10회 이상 약어 (완전히 익힌 것)
+            Builder(builder: (_) {
+              final abbrevs = Store.getAbbreviations();
+              final mastered = abbrevs.where((a) => Store.getStreak(a.displayWord.replaceAll('*',' ')) >= 10).toList();
+              if (mastered.isEmpty) return const SizedBox();
+              return Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(color: const Color(0xFFE8F5E9), borderRadius: BorderRadius.circular(16)),
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      const Icon(Icons.verified_rounded, color: Colors.green, size: 16),
+                      const SizedBox(width: 6),
+                      Text('완전히 익힌 약어 ${mastered.length}개', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.green)),
+                    ]),
+                    const SizedBox(height: 6),
+                    Wrap(spacing: 6, runSpacing: 4, children: mastered.take(10).map((a) => Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(color: Colors.green.withOpacity(0.15), borderRadius: BorderRadius.circular(12)),
+                      child: Text(a.displayWord.replaceAll('*',' '), style: const TextStyle(fontSize: 12, color: Colors.green, fontWeight: FontWeight.w600)))).toList()),
+                    if (mastered.length > 10) Padding(padding: const EdgeInsets.only(top: 4),
+                      child: Text('+${mastered.length - 10}개 더', style: const TextStyle(fontSize: 11, color: Colors.grey))),
+                  ])));
+            }),
             const SizedBox(height: 16),
           ]))));
       });
@@ -3600,6 +3699,21 @@ class _QuizScreenState extends State<QuizScreen> {
       pool.addAll(sentences);
     }
     pool.shuffle();
+    // 오답 가중치: 최근 7일 많이 틀린 약어는 풀에 중복 추가
+    final wrongCounts = Store.getRecentWrongCounts(days: 7);
+    if (wrongCounts.isNotEmpty) {
+      final extras = <dynamic>[];
+      for (final item in pool) {
+        final text = item is AbbreviationModel
+            ? item.displayWord.replaceAll('*', ' ')
+            : (item as SavedSentenceModel).text;
+        final cnt = wrongCounts[text] ?? 0;
+        if (cnt >= 3) extras.add(item);       // 3번 이상 틀림 → 1개 추가
+        if (cnt >= 6) extras.add(item);       // 6번 이상 틀림 → 1개 더 추가
+      }
+      pool.addAll(extras);
+      pool.shuffle();
+    }
     final count = _quizCount.clamp(1, pool.length);
     return pool.take(count).toList();
   }
@@ -3694,6 +3808,9 @@ class _QuizScreenState extends State<QuizScreen> {
 
     if (wrongWords.isNotEmpty) {
       Store.logQuizWrong(correctText);
+      Store.resetStreak(correctText);
+    } else {
+      Store.logQuizCorrect(correctText);
     }
 
     if (_currentIdx < _questions.length - 1) {
@@ -3708,6 +3825,9 @@ class _QuizScreenState extends State<QuizScreen> {
       });
     } else {
       TtsController.instance.stop();
+      // 테스트 완료 시 오늘 결과 기록
+      final correct = _results.where((r) => r['correct'] as bool).length;
+      Store.logTodayQuizResult(correct + (wrongWords.isEmpty ? 1 : 0), _questions.length);
       setState(() => _finished = true);
     }
   }
