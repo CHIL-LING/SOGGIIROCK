@@ -2690,6 +2690,21 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
               const SizedBox(height: 4),
               Text('※ 띄어쓰기 → * 자동 변환  |  약어 입력 후 Alt+Shift → 초중종성 생략하고 다음 약어로', style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
               const SizedBox(height: 8),
+              // 속기 키보드 클릭 입력
+              _SoggiKeyboardInput(
+                onKeyTap: (label, type) {
+                  // 타입에 따라 해당 입력창에 추가
+                  TextEditingController? ctrl;
+                  if (type == 'cho') ctrl = row['initial'];
+                  else if (type == 'jung') ctrl = row['medial'];
+                  else ctrl = row['final'];
+                  if (ctrl == null) return;
+                  final cur = ctrl.text;
+                  ctrl.text = cur.isEmpty ? label : '$cur+$label';
+                  ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
+                  setS(() {});
+                }),
+              const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   _lbl('초성'), TextField(controller: row['initial'], decoration: _inputDeco(''), textInputAction: TextInputAction.next),
@@ -2833,6 +2848,266 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
   }
 }
 
+// 약어 등록 시 키보드 클릭으로 초/중/종성 입력하는 위젯
+class _SoggiKeyboardInput extends StatefulWidget {
+  final void Function(String label, String type) onKeyTap;
+  const _SoggiKeyboardInput({required this.onKeyTap});
+  @override State<_SoggiKeyboardInput> createState() => _SoggiKeyboardInputState();
+}
+class _SoggiKeyboardInputState extends State<_SoggiKeyboardInput> {
+  bool _show = false;
+  @override
+  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    GestureDetector(
+      onTap: () => setState(() => _show = !_show),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(_show ? Icons.keyboard_hide_rounded : Icons.keyboard_rounded, size: 16, color: kBlue),
+        const SizedBox(width: 4),
+        Text(_show ? '키보드 숨기기' : '키보드로 입력',
+            style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
+      ])),
+    if (_show) ...[
+      const SizedBox(height: 8),
+      SingleChildScrollView(scrollDirection: Axis.horizontal,
+        child: _SoggiInputKeyboard(onKeyTap: widget.onKeyTap)),
+    ],
+  ]);
+}
+
+class _SoggiInputKeyboard extends StatelessWidget {
+  final void Function(String label, String type) onKeyTap;
+  const _SoggiInputKeyboard({required this.onKeyTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <int, List<_SoggiKey>>{};
+    for (final k in _kbKeys) {
+      rows.putIfAbsent(k.row, () => []).add(k);
+    }
+    for (final r in rows.values) r.sort((a, b) => a.col.compareTo(b.col));
+
+    Color keyBg(String type) {
+      if (type == 'cho') return const Color(0xFFE8F0FE);
+      if (type == 'jung') return const Color(0xFFF3E8FD);
+      return const Color(0xFFFFE8E8);
+    }
+    Color keyFg(String type) {
+      if (type == 'cho') return const Color(0xFF4A90E2);
+      if (type == 'jung') return const Color(0xFF7B5EA7);
+      return const Color(0xFFE2574A);
+    }
+
+    Widget buildKey(_SoggiKey k, {double w = 34, double h = 34}) {
+      final isThumb = k.row == 3;
+      return GestureDetector(
+        onTap: () => onKeyTap(k.label, k.type == 'jong_special' ? 'jong' : k.type),
+        child: Container(
+          width: w, height: h, margin: const EdgeInsets.all(2),
+          decoration: BoxDecoration(
+            color: keyBg(k.type == 'jong_special' ? 'jong' : k.type),
+            borderRadius: isThumb
+                ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2), topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
+                : BorderRadius.circular(6),
+            border: Border.all(color: keyFg(k.type == 'jong_special' ? 'jong' : k.type).withOpacity(0.4)),
+          ),
+          child: Center(child: Text(k.label,
+              style: TextStyle(fontSize: k.col == 0 || k.col == 9 ? 11 : 13,
+                  color: keyFg(k.type == 'jong_special' ? 'jong' : k.type), fontWeight: FontWeight.w700)))));
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      // 범례
+      Row(children: [
+        _kbLegendStatic(const Color(0xFF4A90E2), '초성(클릭→초성칸)'),
+        const SizedBox(width: 10),
+        _kbLegendStatic(const Color(0xFF7B5EA7), '중성(클릭→중성칸)'),
+        const SizedBox(width: 10),
+        _kbLegendStatic(const Color(0xFFE2574A), '종성(클릭→종성칸)'),
+      ]),
+      const SizedBox(height: 6),
+      for (int r = 0; r < 3; r++)
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          ...rows[r]!.map((k) {
+            final isSide = k.col == 0 || k.col == 9;
+            if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
+              return Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: 4, height: 30, margin: const EdgeInsets.symmetric(horizontal: 2),
+                    decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
+                buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34),
+              ]);
+            }
+            return buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34);
+          }),
+        ]),
+      const SizedBox(height: 4),
+      Padding(padding: const EdgeInsets.only(left: 28),
+        child: Row(mainAxisSize: MainAxisSize.min,
+            children: rows[3]!.map((k) => buildKey(k, w: 36, h: 44)).toList())),
+    ]);
+  }
+
+  Widget _kbLegendStatic(Color color, String label) => Row(mainAxisSize: MainAxisSize.min, children: [
+    Container(width: 10, height: 10, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3))),
+    const SizedBox(width: 4),
+    Text(label, style: const TextStyle(fontSize: 9, color: Colors.grey)),
+  ]);
+}
+
+// ── 속기 키보드 배열 시각화 ──────────────────────────────────────────────────
+
+// 각 키의 ID → 표시 문자, 타입(cho/jung/jong), 행/열 위치
+// 레이아웃: 왼사이드(col=0), 왼본체(col=1~4), 오른본체(col=5~8), 오른사이드(col=9)
+// type: cho=초성, jong=종성, jung=중성, jong_special=(ㅋ)종성
+class _SoggiKey {
+  final String label, type;
+  final int row, col;
+  const _SoggiKey(this.label, this.type, this.row, this.col);
+}
+
+const _kbKeys = [
+  // 왼쪽 사이드 (col 0)
+  _SoggiKey('ㅊ','cho',0,0), _SoggiKey('ㅅ','cho',1,0), _SoggiKey('ㅁ','cho',2,0),
+  // 왼쪽 본체 상단 (row 0, col 1~4)
+  _SoggiKey('ㅌ','cho',0,1), _SoggiKey('ㅋ','cho',0,2), _SoggiKey('ㅂ','cho',0,3), _SoggiKey('ㅍ','cho',0,4),
+  // 왼쪽 본체 중단 (row 1, col 1~4)
+  _SoggiKey('ㄷ','cho',1,1), _SoggiKey('ㅈ','cho',1,2), _SoggiKey('ㄱ','cho',1,3), _SoggiKey('(ㅋ)','jong_special',1,4),
+  // 왼쪽 본체 하단 (row 2, col 1~4)
+  _SoggiKey('ㄹ','cho',2,1), _SoggiKey('ㄴ','cho',2,2), _SoggiKey('ㅎ','cho',2,3), _SoggiKey('ㅢ','jung',2,4),
+  // 오른쪽 본체 상단 (row 0, col 5~8)
+  _SoggiKey('ㄲ','jong',0,5), _SoggiKey('ㅎ','jong',0,6), _SoggiKey('ㅌ','jong',0,7), _SoggiKey('ㅊ','jong',0,8),
+  // 오른쪽 본체 중단 (row 1, col 5~8)
+  _SoggiKey('ㄱ','jong',1,5), _SoggiKey('ㄴ','jong',1,6), _SoggiKey('ㄹ','jong',1,7), _SoggiKey('ㅅ','jong',1,8),
+  // 오른쪽 본체 하단 (row 2, col 5~8)
+  _SoggiKey('ㅆ','jong',2,5), _SoggiKey('ㅇ','jong',2,6), _SoggiKey('ㅁ','jong',2,7), _SoggiKey('ㄷ','jong',2,8),
+  // 오른쪽 사이드 (col 9)
+  _SoggiKey('ㅍ','jong',0,9), _SoggiKey('ㅂ','jong',1,9), _SoggiKey('ㅈ','jong',2,9),
+  // 엄지 모음 (row 3, col 0~5)
+  _SoggiKey('ㅗ','jung',3,0), _SoggiKey('ㅏ','jung',3,1), _SoggiKey('ㅜ','jung',3,2),
+  _SoggiKey('ㅡ','jung',3,3), _SoggiKey('ㅓ','jung',3,4), _SoggiKey('ㅣ','jung',3,5),
+];
+
+// 약어 문자열에서 초/중/종성을 추출해서 어떤 키를 눌러야 하는지 반환
+Map<String, Set<String>> _decomposeSoggi(String word) {
+  const choseong =  ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+  const jungseong = ['ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ'];
+  const jongseong = ['','ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+  final cho = <String>{}, jung = <String>{}, jong = <String>{};
+  for (final ch in word.replaceAll('*',' ').runes.map(String.fromCharCode)) {
+    final code = ch.codeUnitAt(0);
+    if (code >= 0xAC00 && code <= 0xD7A3) {
+      final idx = code - 0xAC00;
+      final jongIdx = idx % 28;
+      final jungIdx = (idx ~/ 28) % 21;
+      final choIdx = idx ~/ 28 ~/ 21;
+      cho.add(choseong[choIdx]);
+      jung.add(jungseong[jungIdx]);
+      if (jongIdx > 0) {
+        final j = jongseong[jongIdx];
+        // 종성 ㅋ → (ㅋ) 특수키로 변환
+        jong.add(j == 'ㅋ' ? '(ㅋ)' : j);
+      }
+    } else if (RegExp(r'[ㄱ-ㅎ]').hasMatch(ch)) {
+      cho.add(ch);
+    } else if (RegExp(r'[ㅏ-ㅣ]').hasMatch(ch)) {
+      jung.add(ch);
+    }
+  }
+  return {'cho': cho, 'jung': jung, 'jong': jong};
+}
+
+class SoggiKeyboardWidget extends StatelessWidget {
+  final String word;
+  const SoggiKeyboardWidget({super.key, required this.word});
+
+  @override
+  Widget build(BuildContext context) {
+    final decomp = _decomposeSoggi(word);
+    final choSet = decomp['cho']!;
+    final jungSet = decomp['jung']!;
+    final jongSet = decomp['jong']!;
+
+    Color keyColor(_SoggiKey k) {
+      if (k.type == 'cho' && choSet.contains(k.label)) return const Color(0xFF4A90E2);
+      if ((k.type == 'jung') && jungSet.contains(k.label)) return const Color(0xFF7B5EA7);
+      if ((k.type == 'jong' || k.type == 'jong_special') && jongSet.contains(k.label)) return const Color(0xFFE2574A);
+      return Colors.transparent;
+    }
+    Color textColor(_SoggiKey k) {
+      final c = keyColor(k);
+      return c == Colors.transparent ? Colors.black87 : Colors.white;
+    }
+
+    // 행별로 키 그룹화
+    final rows = <int, List<_SoggiKey>>{};
+    for (final k in _kbKeys) {
+      rows.putIfAbsent(k.row, () => []).add(k);
+    }
+    for (final r in rows.values) {
+      r.sort((a, b) => a.col.compareTo(b.col));
+    }
+
+    Widget buildKey(_SoggiKey k, {double w = 34, double h = 34, double fs = 13, double br = 6}) {
+      final bg = keyColor(k);
+      final isThumb = k.row == 3;
+      return Container(
+        width: w, height: h,
+        margin: const EdgeInsets.all(2),
+        decoration: BoxDecoration(
+          color: bg == Colors.transparent ? const Color(0xFFF0F0F5) : bg,
+          borderRadius: isThumb
+              ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2), topLeft: Radius.circular(4), topRight: Radius.circular(4))
+              : BorderRadius.circular(br),
+          border: Border.all(color: bg == Colors.transparent ? const Color(0xFFDDDDE8) : bg.withOpacity(0.7)),
+          boxShadow: bg != Colors.transparent ? [BoxShadow(color: bg.withOpacity(0.4), blurRadius: 4, spreadRadius: 0, offset: const Offset(0,2))] : null,
+        ),
+        child: Center(child: Text(k.label, style: TextStyle(fontSize: fs, color: textColor(k), fontWeight: FontWeight.w700))),
+      );
+    }
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      // 범례
+      Row(children: [
+        _kbLegend(const Color(0xFF4A90E2), '초성'),
+        const SizedBox(width: 10),
+        _kbLegend(const Color(0xFF7B5EA7), '중성'),
+        const SizedBox(width: 10),
+        _kbLegend(const Color(0xFFE2574A), '종성'),
+      ]),
+      const SizedBox(height: 8),
+      // 메인 키보드 (row 0~2)
+      for (int r = 0; r < 3; r++)
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          ...rows[r]!.map((k) {
+            // 사이드 키 (col 0, col 9) 는 약간 작게
+            final isSide = k.col == 0 || k.col == 9;
+            // 왼/오른 사이드 사이 구분선
+            if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
+              return Row(mainAxisSize: MainAxisSize.min, children: [
+                Container(width: 6, height: 34, margin: const EdgeInsets.symmetric(horizontal: 2),
+                  decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
+                buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34),
+              ]);
+            }
+            return buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34, fs: isSide ? 11 : 13);
+          }),
+        ]),
+      const SizedBox(height: 4),
+      // 엄지 모음 (row 3)
+      Padding(padding: const EdgeInsets.only(left: 28),
+        child: Row(mainAxisSize: MainAxisSize.min,
+          children: rows[3]!.map((k) => buildKey(k, w: 36, h: 44, fs: 13)).toList())),
+    ]);
+  }
+
+  Widget _kbLegend(Color color, String label) => Row(mainAxisSize: MainAxisSize.min, children: [
+    Container(width: 10, height: 10, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(3))),
+    const SizedBox(width: 4),
+    Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
+  ]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 class _AbbrContent extends StatelessWidget {
   final AbbreviationModel abbr;
   final List<GroupModel> groups;
@@ -2883,6 +3158,16 @@ class _AbbrListTileState extends State<_AbbrListTile> {
         itemBuilder: (_) => [
           PopupMenuItem(child: Text(widget.abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가'),
               onTap: () => widget.onFav?.call()),
+          PopupMenuItem(child: const Text('⌨️ 키보드 보기'),
+              onTap: () => showDialog(context: context, builder: (_) => AlertDialog(
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                title: Text(widget.abbr.displayWord.replaceAll('*',' '),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                content: SingleChildScrollView(scrollDirection: Axis.horizontal,
+                  child: SoggiKeyboardWidget(word: widget.abbr.word)),
+                actions: [TextButton(onPressed: () => Navigator.pop(context),
+                    child: const Text('닫기', style: TextStyle(color: Colors.grey)))],
+              ))),
           if (widget.onEdit != null)
             PopupMenuItem(child: const Text('✏️ 수정'), onTap: () => widget.onEdit?.call()),
           if (widget.onRemind != null)
