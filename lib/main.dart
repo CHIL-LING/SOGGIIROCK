@@ -3527,6 +3527,7 @@ class _QuizScreenState extends State<QuizScreen> {
   String _mode = 'abbr'; // 'abbr' or 'sentence'
   final Set<String> _filterGroupIds = {};
   int _quizCount = 10;
+  final TextEditingController _quizCountCtrl = TextEditingController();
   
   // 퀴즈 진행
   List<dynamic> _questions = [];
@@ -3554,6 +3555,7 @@ class _QuizScreenState extends State<QuizScreen> {
   @override
   void dispose() {
     _answerCtrl.dispose();
+    _quizCountCtrl.dispose();
     _inputFocusNode.dispose();
     _keyboardFocusNode.dispose();
     TtsController.instance.stop();
@@ -3826,21 +3828,31 @@ Widget _buildSetup() {
                   decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
                   child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
               const SizedBox(width: 8),
-              SizedBox(width: 60, child: TextField(
-                keyboardType: TextInputType.number,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: '$_quizCount',
-                  hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  filled: true, fillColor: kBlueLight,
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none)),
-                onSubmitted: (v) {
-                  final n = int.tryParse(v);
-                  if (n != null && n > 0) setState(() => _quizCount = n);
-                })),
+              SizedBox(width: 60, child: Focus(
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent &&
+                      (event.logicalKey == LogicalKeyboardKey.enter ||
+                       event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+                    final n = int.tryParse(_quizCountCtrl.text);
+                    if (n != null && n == 0) setState(() => _quizCount = _totalPoolCount());
+                    else if (n != null && n > 0) setState(() => _quizCount = n);
+                    _quizCountCtrl.clear();
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: TextField(
+                  controller: _quizCountCtrl,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: '$_quizCount',
+                    hintStyle: const TextStyle(fontWeight: FontWeight.w900, color: kBlueDark, fontSize: 16),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 8),
+                    filled: true, fillColor: kBlueLight,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none))))),
               const SizedBox(width: 8),
               GestureDetector(
                 onTap: () => setState(() => _quizCount = (_quizCount + 1).clamp(1, 9999)),
