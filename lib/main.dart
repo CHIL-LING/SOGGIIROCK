@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'dart:async';
+import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -275,8 +276,105 @@ class Store {
   static ReminderModel? findReminder(String target) {
     try { return getReminders().firstWhere((r) => r.target == target); } catch (_) { return null; }
   }
-
   static Box get _qw => Hive.box('quizWrongLog');
+
+  // ── 취약점 분석 ──────────────────────────────────────────────────────────
+  // 최근 오답에서 초/중/종성별 취약 패턴 분석
+  static Map<String, Map<String, int>> analyzeWeakPoints({int days = 30}) {
+    final wrongCounts = getRecentWrongCounts(days: days);
+    final result = <String, Map<String, int>>{'cho': {}, 'jung': {}, 'jong': {}};
+    for (final entry in wrongCounts.entries) {
+      final decomp = _decomposeSoggi(entry.key);
+      final weight = entry.value;
+      for (final c in decomp['cho']!) { result['cho']![c] = (result['cho']![c] ?? 0) + weight; }
+      for (final j in decomp['jung']!) { result['jung']![j] = (result['jung']![j] ?? 0) + weight; }
+      for (final j in decomp['jong']!) { result['jong']![j] = (result['jong']![j] ?? 0) + weight; }
+    }
+    return result;
+  }
+
+  // 취약한 초/중/종성을 포함하는 약어 추천
+  static List<AbbreviationModel> recommendByWeakPoints(Map<String, Map<String, int>> weakPoints, {int limit = 10}) {
+    final abbrevs = getAbbreviations();
+    final scored = <MapEntry<AbbreviationModel, int>>[];
+    for (final a in abbrevs) {
+      final decomp = _decomposeSoggi(a.word);
+      int score = 0;
+      for (final c in decomp['cho']!) { score += weakPoints['cho']![c] ?? 0; }
+      for (final j in decomp['jung']!) { score += weakPoints['jung']![j] ?? 0; }
+      for (final j in decomp['jong']!) { score += weakPoints['jong']![j] ?? 0; }
+      if (score > 0) scored.add(MapEntry(a, score));
+    }
+    scored.sort((a, b) => b.value.compareTo(a.value));
+    return scored.take(limit).map((e) => e.key).toList();
+  }
+
+  // ── CSV 내보내기/가져오기 ─────────────────────────────────────────────────
+  static String exportCsv() {
+    final abbrevs = getAbbreviations();
+    final buf = StringBuffer();
+    buf.writeln('word,initial,medial,final_,isComposite,isConcurrent,isAttached,groupIds');
+    for (final a in abbrevs) {
+      buf.writeln([
+        _csvEsc(a.word),
+        _csvEsc(a.initial.join('|')),
+        _csvEsc(a.medial.join('|')),
+        _csvEsc(a.final_.join('|')),
+        a.isComposite ? '1' : '0',
+        a.isConcurrent ? '1' : '0',
+        a.isAttached ? '1' : '0',
+        _csvEsc(a.groupIds.join('|')),
+      ].join(','));
+    }
+    return buf.toString();
+  }
+
+  static String _csvEsc(String s) {
+    if (s.contains(',') || s.contains('"') || s.contains('\n')) {
+      return '"${s.replaceAll('"', '""')}"';
+    }
+    return s;
+  }
+
+  static Future<List<AbbreviationModel>> importCsv(String csv) async {
+    final lines = csv.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    if (lines.length < 2) return [];
+    final result = <AbbreviationModel>[];
+    for (int i = 1; i < lines.length; i++) {
+      try {
+        final cols = _parseCsvLine(lines[i]);
+        if (cols.length < 8) continue;
+        result.add(AbbreviationModel(
+          id: DateTime.now().millisecondsSinceEpoch.toString() + '_$i',
+          word: cols[0],
+          initial: cols[1].isEmpty ? [] : cols[1].split('|'),
+          medial: cols[2].isEmpty ? [] : cols[2].split('|'),
+          final_: cols[3].isEmpty ? [] : cols[3].split('|'),
+          isComposite: cols[4] == '1',
+          isConcurrent: cols[5] == '1',
+          isAttached: cols[6] == '1',
+          groupIds: cols[7].isEmpty ? [] : cols[7].split('|'),
+        ));
+      } catch (_) {}
+    }
+    return result;
+  }
+
+  static List<String> _parseCsvLine(String line) {
+    final result = <String>[];
+    bool inQuote = false;
+    final buf = StringBuffer();
+    for (int i = 0; i < line.length; i++) {
+      final ch = line[i];
+      if (ch == '"') {
+        if (inQuote && i + 1 < line.length && line[i + 1] == '"') { buf.write('"'); i++; }
+        else inQuote = !inQuote;
+      } else if (ch == ',' && !inQuote) { result.add(buf.toString()); buf.clear(); }
+      else buf.write(ch);
+    }
+    result.add(buf.toString());
+    return result;
+  }
   // 연속 정답 추적: 특정 약어를 연속으로 맞춘 횟수 저장/조회/초기화
   static Future<void> logQuizCorrect(String text) async {
     final box = Hive.box('settings');
@@ -1350,6 +1448,12 @@ class _HomeScreenState extends State<HomeScreen> {
                     child: Container(width: 34, height: 34,
                       decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(10)),
                       child: const Center(child: Icon(Icons.bar_chart_rounded, color: kBlue, size: 20)))),
+                  const SizedBox(width: 6),
+                  GestureDetector(
+                    onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const WeakPointScreen())),
+                    child: Container(width: 34, height: 34,
+                      decoration: BoxDecoration(color: const Color(0xFFF3E8FD), borderRadius: BorderRadius.circular(10)),
+                      child: const Center(child: Icon(Icons.analytics_rounded, color: Color(0xFF7B5EA7), size: 20)))),
                 ]),
               ])),
             const SizedBox(height: 8),
@@ -2314,6 +2418,8 @@ class _SearchScreenState extends State<SearchScreen> {
                           child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.checklist_rounded))),
                         GestureDetector(onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const GroupManageScreen())),
                           child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.folder_rounded))),
+                        GestureDetector(onTap: () => _showCsvDialog(context),
+                          child: Padding(padding: const EdgeInsets.only(right: 8), child: _iconToolBtn(Icons.import_export_rounded))),
                         ElevatedButton.icon(onPressed: () => _showAbbrEditDialog(context),
                           icon: const Icon(Icons.add, size: 16), label: const Text('추가'),
                           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
@@ -2420,6 +2526,79 @@ class _SearchScreenState extends State<SearchScreen> {
               ])));
           });
       });
+  }
+
+  void _showCsvDialog(BuildContext context) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('CSV 백업/가져오기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('약어 데이터를 CSV 형식으로 내보내거나 가져올 수 있어요.',
+            style: TextStyle(fontSize: 13, color: Colors.grey)),
+        const SizedBox(height: 16),
+        SizedBox(width: double.infinity, child: ElevatedButton.icon(
+          icon: const Icon(Icons.download_rounded, size: 16),
+          label: const Text('CSV 내보내기 (클립보드 복사)'),
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+          onPressed: () {
+            final csv = Store.exportCsv();
+            Clipboard.setData(ClipboardData(text: csv));
+            Navigator.pop(ctx);
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('CSV가 클립보드에 복사됐어요! 메모장 등에 붙여넣어 저장하세요.'),
+                  backgroundColor: kBlue, duration: Duration(seconds: 3)));
+          })),
+        const SizedBox(height: 8),
+        SizedBox(width: double.infinity, child: OutlinedButton.icon(
+          icon: const Icon(Icons.upload_rounded, size: 16, color: kBlue),
+          label: const Text('CSV 가져오기', style: TextStyle(color: kBlue)),
+          style: OutlinedButton.styleFrom(side: const BorderSide(color: kBlue),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+          onPressed: () {
+            Navigator.pop(ctx);
+            _showCsvImportDialog(context);
+          })),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('닫기', style: TextStyle(color: Colors.grey))),
+      ]));
+  }
+
+  void _showCsvImportDialog(BuildContext context) {
+    final ctrl = TextEditingController();
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('CSV 가져오기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text('내보낸 CSV 내용을 붙여넣어 주세요.', style: TextStyle(fontSize: 13, color: Colors.grey)),
+        const SizedBox(height: 12),
+        TextField(controller: ctrl, maxLines: 6, decoration: _inputDeco('CSV 내용 붙여넣기...')),
+      ]),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+          onPressed: () async {
+            final csv = ctrl.text.trim();
+            if (csv.isEmpty) return;
+            final items = await Store.importCsv(csv);
+            if (items.isEmpty) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('가져올 수 있는 데이터가 없어요.'), backgroundColor: Colors.red));
+              return;
+            }
+            Navigator.pop(ctx);
+            for (final a in items) await Store.saveAbbreviation(a);
+            setState(() {});
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('${items.length}개의 약어를 가져왔어요!'), backgroundColor: kBlue));
+            }
+          }, child: const Text('가져오기')),
+      ]));
   }
 
   void _showGroupFilter(BuildContext context, List<GroupModel> groups) {
@@ -2736,6 +2915,110 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
             onPressed: saveAll, child: const Text('저장')),
         ]));
     }));
+}
+
+// ── 취약점 분석 화면 ──────────────────────────────────────────────────────────
+class WeakPointScreen extends StatelessWidget {
+  const WeakPointScreen({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final weakPoints = Store.analyzeWeakPoints(days: 30);
+    final recommended = Store.recommendByWeakPoints(weakPoints);
+    final allEmpty = weakPoints.values.every((m) => m.isEmpty);
+
+    String buildPrompt() {
+      final cho = (weakPoints['cho'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
+      final jung = (weakPoints['jung'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
+      final jong = (weakPoints['jong'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
+      final recWords = recommended.map((a) => a.displayWord.replaceAll('*',' ')).join(', ');
+      return '''속기 학습 취약점 분석 결과입니다.
+
+[취약한 초성] ${cho.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
+[취약한 중성] ${jung.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
+[취약한 종성] ${jong.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
+[취약 관련 약어] $recWords
+
+위 취약점을 집중적으로 연습할 수 있는 속기 연습 문장 10개를 만들어주세요.
+각 문장은 취약한 자음/모음이 자주 등장하도록 구성해주세요.''';
+    }
+
+    return Scaffold(backgroundColor: Colors.white,
+      appBar: AppBar(backgroundColor: Colors.white, elevation: 0,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios_rounded, color: kBlue),
+            onPressed: () => Navigator.pop(context)),
+        title: const Text('취약점 분석', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18))),
+      body: allEmpty
+        ? const Center(child: Padding(padding: EdgeInsets.all(32),
+            child: Text('아직 오답 데이터가 없어요.\n테스트를 더 진행하면 분석 결과가 나타납니다.',
+                textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 14))))
+        : SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            // 초/중/종성별 취약도
+            for (final entry in [
+              MapEntry('초성', weakPoints['cho']!),
+              MapEntry('중성', weakPoints['jung']!),
+              MapEntry('종성', weakPoints['jong']!),
+            ]) ...[
+              if (entry.value.isNotEmpty) ...[
+                Text(entry.key, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+                const SizedBox(height: 8),
+                () {
+                  final sorted = entry.value.entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
+                  final max = sorted.first.value;
+                  return Column(children: sorted.take(8).map((e) => Padding(
+                    padding: const EdgeInsets.only(bottom: 6),
+                    child: Row(children: [
+                      SizedBox(width: 36, child: Text(e.key, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700))),
+                      const SizedBox(width: 8),
+                      Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(value: e.value / max,
+                          backgroundColor: const Color(0xFFEEEEEE),
+                          color: entry.key == '초성' ? const Color(0xFF4A90E2) : entry.key == '중성' ? const Color(0xFF7B5EA7) : const Color(0xFFE2574A),
+                          minHeight: 16))),
+                      const SizedBox(width: 8),
+                      Text('${e.value}회', style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                    ]))).toList());
+                }(),
+                const SizedBox(height: 20),
+              ],
+            ],
+            // 취약 약어 추천
+            if (recommended.isNotEmpty) ...[
+              const Text('취약점 관련 추천 약어', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+              const SizedBox(height: 8),
+              Wrap(spacing: 8, runSpacing: 8, children: recommended.map((a) =>
+                Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
+                  child: Text(a.displayWord.replaceAll('*',' '),
+                      style: const TextStyle(fontSize: 13, color: kBlue, fontWeight: FontWeight.w600)))).toList()),
+              const SizedBox(height: 24),
+            ],
+            // AI 프롬프트 복사
+            Container(width: double.infinity, padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: const Color(0xFFF8F4FF), borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFD0B8FF))),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                const Row(children: [
+                  Icon(Icons.auto_awesome_rounded, size: 16, color: Color(0xFF7B5EA7)),
+                  SizedBox(width: 6),
+                  Text('AI 연습 문장 생성', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF7B5EA7))),
+                ]),
+                const SizedBox(height: 8),
+                const Text('아래 프롬프트를 복사해서 AI에게 붙여넣으면\n취약점 맞춤 연습 문장을 만들어 줍니다.',
+                    style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 12),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: buildPrompt()));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('프롬프트가 복사됐어요!'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+                  },
+                  icon: const Icon(Icons.copy_rounded, size: 16),
+                  label: const Text('프롬프트 복사'),
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7B5EA7), foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
+              ])),
+          ])));
+  }
 }
 
 class GroupManageScreen extends StatefulWidget {
