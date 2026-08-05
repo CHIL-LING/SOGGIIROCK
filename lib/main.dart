@@ -2537,7 +2537,7 @@ class _SearchScreenState extends State<SearchScreen> {
             style: TextStyle(fontSize: 13, color: Colors.grey)),
         const SizedBox(height: 16),
         SizedBox(width: double.infinity, child: ElevatedButton.icon(
-          icon: const Icon(Icons.download_rounded, size: 16),
+          icon: const Icon(Icons.upload_rounded, size: 16),
           label: const Text('CSV 내보내기 (클립보드 복사)'),
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
@@ -2551,7 +2551,7 @@ class _SearchScreenState extends State<SearchScreen> {
           })),
         const SizedBox(height: 8),
         SizedBox(width: double.infinity, child: OutlinedButton.icon(
-          icon: const Icon(Icons.upload_rounded, size: 16, color: kBlue),
+          icon: const Icon(Icons.download_rounded, size: 16, color: kBlue),
           label: const Text('CSV 가져오기', style: TextStyle(color: kBlue)),
           style: OutlinedButton.styleFrom(side: const BorderSide(color: kBlue),
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
@@ -2829,13 +2829,13 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
             final i = e.key; final row = e.value;
             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               if (rows.length > 1) Row(children: [
-                Text('${i + 1}번', style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
-                const Spacer(),
                 GestureDetector(onTap: () => setS(() {
                     rows.removeAt(i); rowFlags.removeAt(i); rowGroupIds.removeAt(i);
                     wordFocusNodes.removeAt(i).dispose();
                   }),
                   child: const Icon(Icons.remove_circle_outline, size: 16, color: Colors.red)),
+                const SizedBox(width: 6),
+                Text('${i + 1}번', style: const TextStyle(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.w600)),
               ]),
               if (rows.length > 1) const SizedBox(height: 4),
               _lbl('약어'),
@@ -3180,52 +3180,62 @@ class _SoggiInputKeyboard extends StatelessWidget {
       return const Color(0xFFE2574A);
     }
 
-    Widget buildKey(_SoggiKey k, {double w = 34, double h = 34}) {
+    Widget buildKey(_SoggiKey k, {double w = 34, double h = 34, double fs = 13}) {
       final isThumb = k.row == 3;
-      return GestureDetector(
-        onTap: () => onKeyTap(k.label, k.type == 'jong_special' ? 'jong' : k.type),
-        child: Container(
-          width: w, height: h, margin: const EdgeInsets.all(2),
-          decoration: BoxDecoration(
-            color: keyBg(k.type == 'jong_special' ? 'jong' : k.type),
-            borderRadius: isThumb
-                ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2), topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
-                : BorderRadius.circular(6),
-            border: Border.all(color: keyFg(k.type == 'jong_special' ? 'jong' : k.type).withOpacity(0.4)),
-          ),
-          child: Center(child: Text(k.label,
-              style: TextStyle(fontSize: k.col == 0 || k.col == 9 ? 11 : 13,
-                  color: keyFg(k.type == 'jong_special' ? 'jong' : k.type), fontWeight: FontWeight.w700)))));
+      final fgColor = keyFg(k.type == 'jong_special' ? 'jong' : k.type);
+      final bgColor = keyBg(k.type == 'jong_special' ? 'jong' : k.type);
+      final br = isThumb
+          ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2),
+              topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
+          : BorderRadius.circular(6);
+      return Container(
+        width: w, height: h, margin: const EdgeInsets.all(2),
+        decoration: BoxDecoration(color: bgColor, borderRadius: br,
+            border: Border.all(color: fgColor.withOpacity(0.4))),
+        child: Material(color: Colors.transparent, borderRadius: br,
+          child: InkWell(
+            onTap: () => onKeyTap(k.label, k.type == 'jong_special' ? 'jong' : k.type),
+            borderRadius: br, splashColor: fgColor.withOpacity(0.4), highlightColor: fgColor.withOpacity(0.2),
+            child: Center(child: Text(k.label,
+                style: TextStyle(fontSize: fs, color: fgColor, fontWeight: FontWeight.w700))))));
     }
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      // 범례
       Row(children: [
-        _kbLegendStatic(const Color(0xFF4A90E2), '초성(클릭→초성칸)'),
+        _kbLegendStatic(const Color(0xFF4A90E2), '초성'),
         const SizedBox(width: 10),
-        _kbLegendStatic(const Color(0xFF7B5EA7), '중성(클릭→중성칸)'),
+        _kbLegendStatic(const Color(0xFF7B5EA7), '중성'),
         const SizedBox(width: 10),
-        _kbLegendStatic(const Color(0xFFE2574A), '종성(클릭→종성칸)'),
+        _kbLegendStatic(const Color(0xFFE2574A), '종성'),
       ]),
       const SizedBox(height: 6),
-      for (int r = 0; r < 3; r++)
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          ...rows[r]!.map((k) {
-            final isSide = k.col == 0 || k.col == 9;
-            if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
-              return Row(mainAxisSize: MainAxisSize.min, children: [
-                Container(width: 4, height: 30, margin: const EdgeInsets.symmetric(horizontal: 2),
-                    decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
-                buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34),
-              ]);
-            }
-            return buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34);
-          }),
-        ]),
-      const SizedBox(height: 4),
-      Padding(padding: const EdgeInsets.only(left: 28),
-        child: Row(mainAxisSize: MainAxisSize.min,
-            children: rows[3]!.map((k) => buildKey(k, w: 36, h: 44)).toList())),
+      LayoutBuilder(builder: (context, constraints) {
+        // 전체 키보드 너비: 사이드2 + 본체8 + 구분선1 = 11칸 × 38px + 마진
+        const baseW = 38.0 * 11 + 8;
+        final scale = (constraints.maxWidth / baseW).clamp(0.5, 1.0);
+        final kw = 38.0 * scale;
+        final kh = 38.0 * scale;
+        final fs = 13.0 * scale;
+        return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          for (int r = 0; r < 3; r++)
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              ...rows[r]!.map((k) {
+                if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
+                  return Row(mainAxisSize: MainAxisSize.min, children: [
+                    Container(width: 4 * scale, height: kh * 0.8, margin: EdgeInsets.symmetric(horizontal: 2 * scale),
+                        decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
+                    buildKey(k, w: kw, h: kh, fs: fs),
+                  ]);
+                }
+                return buildKey(k, w: kw, h: kh, fs: fs);
+              }),
+            ]),
+          SizedBox(height: 4 * scale),
+          Padding(padding: EdgeInsets.only(left: kw),
+            child: Row(mainAxisSize: MainAxisSize.min,
+                children: rows[3]!.map((k) => buildKey(k, w: kw + 2, h: kh * 1.2, fs: fs)).toList())),
+        ]);
+      }),
     ]);
   }
 
