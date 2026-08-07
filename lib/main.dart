@@ -4251,6 +4251,15 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> {
       _elapsedSec = 0; _ojaCnt = 0; _chumCnt = 0; _talCnt = 0; _totalTyped = 0;
     });
   }
+  
+  KeyEventResult _onKey(FocusNode node, KeyEvent event) {
+  if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+    _timer?.cancel();
+    setState(() => _finished = true);
+    return KeyEventResult.handled;
+  }
+  return KeyEventResult.ignored;
+}
 
   void _onInput(String value) {
     if (!_started || _finished) return;
@@ -4461,19 +4470,27 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> {
             const SizedBox(height: 12),
 
             if (!_finished) ...[
-              // 타이핑 입력창
-              TextField(
-                controller: _inputCtrl,
-                focusNode: _inputFocus,
-                onChanged: _onInput,
-                maxLines: null,
-                decoration: InputDecoration(
-                  hintText: '여기에 타이핑하세요...',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: kBlue))),
-                style: const TextStyle(fontSize: 16)),
+              Focus(
+  onKeyEvent: _onKey,
+  child: TextField(
+    controller: _inputCtrl,
+    focusNode: _inputFocus,
+    onChanged: _onInput,
+    maxLines: null,
+    decoration: InputDecoration(
+      hintText: '여기에 타이핑하세요...',
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFFE0E0E0)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: kBlue),
+      ),
+    ),
+    style: const TextStyle(fontSize: 16),
+  ),
+),
             ] else ...[
               // 완료 결과
               Container(width: double.infinity, padding: const EdgeInsets.all(20),
