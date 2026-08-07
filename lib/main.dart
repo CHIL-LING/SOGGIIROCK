@@ -1098,7 +1098,7 @@ class _MainShellState extends State<MainShell> with SingleTickerProviderStateMix
 
   final _screens = const [
     HomeScreen(), SentenceAnalyzerScreen(), SearchScreen(),
-    SentenceRegisterScreen(), RemindersScreen(), QuizScreen(),
+    SentenceRegisterScreen(), RemindersScreen(), QuizScreen(), TypingPracticeScreen(),
   ];
   @override
   void initState() {
@@ -1203,6 +1203,7 @@ void _checkTodayReminders() {
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.keyboard_rounded)), label: '타이핑'),
           ]))));
   }
 }
@@ -4193,6 +4194,335 @@ void _showBulkReminderDialog(BuildContext context, List<String> targets, String 
 }
 
 // ── 퀴즈 화면 ────────────────────────────────────────────────────────
+// ── 타이핑 연습 화면 ──────────────────────────────────────────────────────────
+class TypingPracticeScreen extends StatefulWidget {
+  const TypingPracticeScreen({super.key});
+  @override State<TypingPracticeScreen> createState() => _TypingPracticeScreenState();
+}
+
+class _TypingPracticeScreenState extends State<TypingPracticeScreen> {
+  final _textCtrl = TextEditingController();
+  final _inputCtrl = TextEditingController();
+  final _inputFocus = FocusNode();
+  String _practiceText = '';
+  bool _started = false;
+  bool _finished = false;
+  DateTime? _startTime;
+  int _elapsedSec = 0;
+  Timer? _timer;
+  int _ojaCnt = 0;   // 오자 (교체)
+  int _chumCnt = 0;  // 첨자 (삽입)
+  int _talCnt = 0;   // 탈자 (삭제)
+  int _totalTyped = 0;
+  String _lastValue = '';
+
+  // 공백 제거한 목표 문장
+  String get _targetNorm => _practiceText.replaceAll(' ', '');
+
+  @override
+  void dispose() {
+    _textCtrl.dispose();
+    _inputCtrl.dispose();
+    _inputFocus.dispose();
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  void _start() {
+    if (_practiceText.isEmpty) return;
+    setState(() {
+      _started = true; _finished = false;
+      _inputCtrl.clear(); _lastValue = '';
+      _startTime = DateTime.now(); _elapsedSec = 0;
+      _ojaCnt = 0; _chumCnt = 0; _talCnt = 0; _totalTyped = 0;
+    });
+    _timer?.cancel();
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _elapsedSec++);
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) => _inputFocus.requestFocus());
+  }
+
+  void _reset() {
+    _timer?.cancel();
+    setState(() {
+      _started = false; _finished = false;
+      _inputCtrl.clear(); _lastValue = '';
+      _elapsedSec = 0; _ojaCnt = 0; _chumCnt = 0; _talCnt = 0; _totalTyped = 0;
+    });
+  }
+
+  void _onInput(String value) {
+    if (!_started || _finished) return;
+
+    // 백스페이스 금지: 이전보다 짧아지면 원복
+    if (value.length < _lastValue.length) {
+      _inputCtrl.text = _lastValue;
+      _inputCtrl.selection = TextSelection.collapsed(offset: _lastValue.length);
+      return;
+    }
+
+    // 공백 입력 시 자동으로 목표 문장의 다음 공백 위치에 맞게 처리
+    // (띄어쓰기 무시: 공백은 자동 삽입)
+    String processed = value;
+    final target = _practiceText;
+    // 공백 제거 비교용
+    final typedNorm = processed.replaceAll(' ', '');
+
+    _lastValue = processed;
+
+    // 편집 거리 기반 오자/첨자/탈자 계산
+    final result = _calcDiff(typedNorm, _targetNorm);
+
+    setState(() {
+      _ojaCnt = result['oja']!;
+      _chumCnt = result['chum']!;
+      _talCnt = result['tal']!;
+      _totalTyped = typedNorm.length;
+    });
+
+    // 완료 체크 (공백 무시하고 비교)
+    if (typedNorm == _targetNorm) {
+      _timer?.cancel();
+      setState(() => _finished = true);
+    }
+  }
+
+  // 편집 거리 계산 → 오자/첨자/탈자 구분
+  Map<String, int> _calcDiff(String typed, String target) {
+    final n = typed.length, m = target.length;
+    // DP 테이블
+    final dp = List.generate(n + 1, (_) => List.filled(m + 1, 0));
+    for (int i = 0; i <= n; i++) dp[i][0] = i;
+    for (int j = 0; j <= m; j++) dp[0][j] = j;
+    for (int i = 1; i <= n; i++) {
+      for (int j = 1; j <= m; j++) {
+        if (typed[i-1] == target[j-1]) dp[i][j] = dp[i-1][j-1];
+        else dp[i][j] = 1 + [dp[i-1][j-1], dp[i-1][j], dp[i][j-1]].reduce((a,b) => a < b ? a : b);
+      }
+    }
+    // 역추적으로 오자/첨자/탈자 구분
+    int oja = 0, chum = 0, tal = 0;
+    int i = n, j = m;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && typed[i-1] == target[j-1]) { i--; j--; }
+      else if (i > 0 && j > 0 && dp[i][j] == dp[i-1][j-1] + 1) { oja++; i--; j--; } // 교체=오자
+      else if (i > 0 && dp[i][j] == dp[i-1][j] + 1) { chum++; i--; }  // 삽입=첨자
+      else { tal++; j--; }  // 삭제=탈자
+    }
+    return {'oja': oja, 'chum': chum, 'tal': tal};
+  }
+
+  int get _totalErrors => _ojaCnt + _chumCnt + _talCnt;
+  // 타수 = 타이핑한 글자 수 ÷ 걸린 시간(분)
+  double get _tasu => _elapsedSec > 0 ? (_totalTyped / (_elapsedSec / 60)) : 0;
+  double get _accuracy => _totalTyped > 0
+      ? ((_totalTyped - _totalErrors) / _totalTyped * 100).clamp(0, 100)
+      : 100;
+
+  // 글자별 색상 (공백 무시 diff 기반)
+  List<TextSpan> _buildColoredText() {
+    final target = _practiceText;
+    final typedNorm = _inputCtrl.text.replaceAll(' ', '');
+    final targetNorm = _targetNorm;
+    final spans = <TextSpan>[];
+
+    // LCS 기반으로 각 글자 상태 계산
+    final n = typedNorm.length, m = targetNorm.length;
+    final dp = List.generate(n + 1, (_) => List.filled(m + 1, 0));
+    for (int i = 0; i <= n; i++) dp[i][0] = i;
+    for (int j = 0; j <= m; j++) dp[0][j] = j;
+    for (int i = 1; i <= n; i++) {
+      for (int j = 1; j <= m; j++) {
+        if (typedNorm[i-1] == targetNorm[j-1]) dp[i][j] = dp[i-1][j-1];
+        else dp[i][j] = 1 + [dp[i-1][j-1], dp[i-1][j], dp[i][j-1]].reduce((a,b) => a < b ? a : b);
+      }
+    }
+
+    // 목표 문장의 각 글자 상태: matched/wrong/pending
+    final states = List.filled(targetNorm.length, 'pending');
+    int i = n, j = m;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && typedNorm[i-1] == targetNorm[j-1]) {
+        states[j-1] = 'correct'; i--; j--;
+      } else if (i > 0 && j > 0 && dp[i][j] == dp[i-1][j-1] + 1) {
+        states[j-1] = 'wrong'; i--; j--;
+      } else if (i > 0 && dp[i][j] == dp[i-1][j] + 1) { i--; }
+      else { states[j-1] = 'pending'; j--; }
+    }
+
+    // 목표 문장(공백 포함) 기준으로 색상 적용
+    int normIdx = 0;
+    for (int k = 0; k < target.length; k++) {
+      if (target[k] == ' ') {
+        spans.add(const TextSpan(text: ' ', style: TextStyle(fontSize: 18)));
+        continue;
+      }
+      final state = normIdx < states.length ? states[normIdx] : 'pending';
+      normIdx++;
+      Color color;
+      if (state == 'correct') color = Colors.green;
+      else if (state == 'wrong') color = Colors.red;
+      else if (normIdx - 1 == typedNorm.length) color = kBlue;
+      else color = Colors.grey.shade400;
+      spans.add(TextSpan(text: target[k],
+          style: TextStyle(color: color, fontWeight: FontWeight.w700, fontSize: 18)));
+    }
+    return spans;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final sentences = Store.getSentences();
+    return Scaffold(backgroundColor: Colors.white,
+      body: SafeArea(child: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          // 헤더
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            const Text('타이핑 연습', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+            if (_started)
+              GestureDetector(onTap: _reset, child: _iconToolBtn(Icons.refresh_rounded)),
+          ]),
+          const SizedBox(height: 16),
+
+          if (!_started) ...[
+            // 문장 입력 or 저장된 문장 선택
+            _lbl('연습할 문장'),
+            TextField(controller: _textCtrl, maxLines: 4,
+              decoration: InputDecoration(
+                hintText: '연습할 문장을 입력하거나 아래에서 선택하세요...',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: kBlue)))),
+            const SizedBox(height: 12),
+
+            // 저장된 문장 선택
+            if (sentences.isNotEmpty) ...[
+              _lbl('저장된 문장에서 선택'),
+              SizedBox(height: 120,
+                child: ListView.builder(itemCount: sentences.length,
+                  itemBuilder: (_, i) {
+                    final s = sentences[i];
+                    return GestureDetector(
+                      onTap: () => setState(() => _textCtrl.text = s.text),
+                      child: Container(margin: const EdgeInsets.only(bottom: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: _textCtrl.text == s.text ? kBlueLight : const Color(0xFFF8F8F8),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: _textCtrl.text == s.text ? kBlue : Colors.transparent)),
+                        child: Text(s.text, style: const TextStyle(fontSize: 13),
+                            maxLines: 2, overflow: TextOverflow.ellipsis)));
+                  })),
+              const SizedBox(height: 12),
+            ],
+
+            SizedBox(width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: () {
+                  final text = _textCtrl.text.trim();
+                  if (text.isEmpty) return;
+                  setState(() => _practiceText = text);
+                  _start();
+                },
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: const Text('시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))),
+          ] else ...[
+            // 진행 중 / 완료
+            // 실시간 통계
+            Row(children: [
+              _statChip(Icons.timer_rounded, '${_elapsedSec}초', kBlue),
+              const SizedBox(width: 8),
+              _statChip(Icons.speed_rounded, '${_tasu.round()} 타수', kPurple),
+              const SizedBox(width: 8),
+              _statChip(Icons.check_circle_rounded, '${_accuracy.round()}%', Colors.green),
+            ]),
+            const SizedBox(height: 6),
+            Row(children: [
+              _statChip(Icons.swap_horiz_rounded, '오자 $_ojaCnt', Colors.red),
+              const SizedBox(width: 8),
+              _statChip(Icons.add_rounded, '첨자 $_chumCnt', Colors.orange),
+              const SizedBox(width: 8),
+              _statChip(Icons.remove_rounded, '탈자 $_talCnt', Colors.deepOrange),
+            ]),
+            const SizedBox(height: 16),
+
+            // 목표 문장 (색상 표시)
+            Container(width: double.infinity, padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(color: const Color(0xFFF8F8F8),
+                  borderRadius: BorderRadius.circular(12)),
+              child: RichText(text: TextSpan(children: _buildColoredText()))),
+            const SizedBox(height: 12),
+
+            if (!_finished) ...[
+              // 타이핑 입력창
+              TextField(
+                controller: _inputCtrl,
+                focusNode: _inputFocus,
+                onChanged: _onInput,
+                maxLines: null,
+                decoration: InputDecoration(
+                  hintText: '여기에 타이핑하세요...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(color: kBlue))),
+                style: const TextStyle(fontSize: 16)),
+            ] else ...[
+              // 완료 결과
+              Container(width: double.infinity, padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(color: const Color(0xFFE8F5E9),
+                    borderRadius: BorderRadius.circular(16)),
+                child: Column(children: [
+                  const Icon(Icons.emoji_events_rounded, color: Colors.green, size: 48),
+                  const SizedBox(height: 8),
+                  const Text('완료!', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: Colors.green)),
+                  const SizedBox(height: 16),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                    _resultItem('시간', '${_elapsedSec}초'),
+                    _resultItem('타수', '${_tasu.round()}'),
+                    _resultItem('정확도', '${_accuracy.round()}%'),
+                  ]),
+                  const SizedBox(height: 8),
+                  Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
+                    _resultItem('오자', '$_ojaCnt개'),
+                    _resultItem('첨자', '$_chumCnt개'),
+                    _resultItem('탈자', '$_talCnt개'),
+                  ]),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: _reset,
+                    icon: const Icon(Icons.refresh_rounded),
+                    label: const Text('다시 하기'),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
+                ])),
+            ],
+          ],
+        ]))));
+  }
+
+  Widget _statChip(IconData icon, String label, Color color) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(20)),
+    child: Row(mainAxisSize: MainAxisSize.min, children: [
+      Icon(icon, size: 14, color: color),
+      const SizedBox(width: 4),
+      Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w700)),
+    ]));
+
+  Widget _resultItem(String label, String value) => Column(children: [
+    Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: kBlueDark)),
+    Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+  ]);
+}
+
 class QuizScreen extends StatefulWidget {
   final List<AbbreviationModel>? presetItems;
   const QuizScreen({super.key, this.presetItems});
