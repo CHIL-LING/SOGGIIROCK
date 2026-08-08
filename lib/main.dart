@@ -4287,7 +4287,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> {
       _ojaCnt = result['oja']!;
       _chumCnt = result['chum']!;
       _talCnt = result['tal']!;
-      _totalTyped = typedNorm.length;
+      _totalTyped = _countTasu(typedNorm);
     });
 
     // 완료 체크 (공백 무시하고 비교)
@@ -4324,6 +4324,30 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> {
 
   int get _totalErrors => _ojaCnt + _chumCnt + _talCnt;
   // 타수 = 타이핑한 글자 수 ÷ 걸린 시간(분)
+  // 쿼티 기준 타수 계산 (자모 분해)
+int _countTasu(String text) {
+  const choseong =  ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+  const jungseong = ['ㅏ','ㅐ','ㅑ','ㅒ','ㅓ','ㅔ','ㅕ','ㅖ','ㅗ','ㅘ','ㅙ','ㅚ','ㅛ','ㅜ','ㅝ','ㅞ','ㅟ','ㅠ','ㅡ','ㅢ','ㅣ'];
+  const jongseong = ['','ㄱ','ㄲ','ㄳ','ㄴ','ㄵ','ㄶ','ㄷ','ㄹ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅁ','ㅂ','ㅄ','ㅅ','ㅆ','ㅇ','ㅈ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+  // 겹받침/겹모음 타수 (쿼티 기준 2타)
+  const double2 = {'ㄳ','ㄵ','ㄶ','ㄺ','ㄻ','ㄼ','ㄽ','ㄾ','ㄿ','ㅀ','ㅄ','ㄲ','ㄸ','ㅃ','ㅆ','ㅉ','ㅘ','ㅙ','ㅚ','ㅝ','ㅞ','ㅟ','ㅢ','ㅐ','ㅒ','ㅔ','ㅖ'};
+  int tasu = 0;
+  for (final ch in text.runes.map(String.fromCharCode)) {
+    final code = ch.codeUnitAt(0);
+    if (code >= 0xAC00 && code <= 0xD7A3) {
+      final idx = code - 0xAC00;
+      final jongIdx = idx % 28;
+      final jungIdx = (idx ~/ 28) % 21;
+      final choIdx = idx ~/ 28 ~/ 21;
+      tasu += double2.contains(choseong[choIdx]) ? 2 : 1; // 초성
+      tasu += double2.contains(jungseong[jungIdx]) ? 2 : 1; // 중성
+      if (jongIdx > 0) tasu += double2.contains(jongseong[jongIdx]) ? 2 : 1; // 종성
+    } else {
+      tasu += 1; // 영문/숫자 등
+    }
+  }
+  return tasu;
+}
   double get _tasu => _elapsedSec > 0 ? (_totalTyped / (_elapsedSec / 60)) : 0;
   double get _accuracy => _totalTyped > 0
       ? ((_totalTyped - _totalErrors) / _totalTyped * 100).clamp(0, 100)
