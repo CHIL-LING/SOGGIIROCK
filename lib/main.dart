@@ -1098,7 +1098,7 @@ class _MainShellState extends State<MainShell> with SingleTickerProviderStateMix
 
   final _screens = const [
     HomeScreen(), SentenceAnalyzerScreen(), SearchScreen(),
-    SentenceRegisterScreen(), RemindersScreen(), QuizScreen(), TypingPracticeScreen(),
+    SentenceRegisterScreen(), RemindersScreen(), QuizScreen(),
   ];
   @override
   void initState() {
@@ -1203,7 +1203,6 @@ void _checkTodayReminders() {
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
-            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.keyboard_rounded)), label: '타이핑'),
           ]))));
   }
 }
@@ -3232,7 +3231,7 @@ class _SoggiInputKeyboard extends StatelessWidget {
               }),
             ]),
           SizedBox(height: 4 * scale),
-          Padding(padding: EdgeInsets.only(left: kw),
+          Padding(padding: EdgeInsets.only(left: kw * 2.5),
             child: Row(mainAxisSize: MainAxisSize.min,
                 children: rows[3]!.map((k) => buildKey(k, w: kw + 2, h: kh * 1.2, fs: fs)).toList())),
         ]);
@@ -3386,8 +3385,8 @@ class SoggiKeyboardWidget extends StatelessWidget {
           }),
         ]),
       const SizedBox(height: 4),
-      // 엄지 모음 (row 3)
-      Padding(padding: const EdgeInsets.only(left: 28),
+      // 엄지 모음 (row 3) - 중앙 정렬
+      Padding(padding: const EdgeInsets.only(left: 95),
         child: Row(mainAxisSize: MainAxisSize.min,
           children: rows[3]!.map((k) => buildKey(k, w: 36, h: 44, fs: 13)).toList())),
     ]);
@@ -4571,6 +4570,9 @@ class QuizScreen extends StatefulWidget {
 }
 
 class _QuizScreenState extends State<QuizScreen> {
+  // 테스트 탭 (약어테스트 / 타이핑연습)
+  bool _showTyping = false;
+
   // 설정
   String _mode = 'abbr'; // 'abbr' or 'sentence'
   final Set<String> _filterGroupIds = {};
@@ -4864,9 +4866,38 @@ class _QuizScreenState extends State<QuizScreen> {
       builder: (context, _, __) => ValueListenableBuilder(
         valueListenable: Hive.box('sentences').listenable(),
         builder: (context, __, ___) {
-          if (!_started) return _buildSetup();
-          if (_finished) return _buildResult();
-          return _buildQuiz();
+          return Column(children: [
+            // 상단 탭 토글
+            if (!_started && !_showTyping || _showTyping)
+              Container(color: Colors.white,
+                padding: const EdgeInsets.fromLTRB(16, 48, 16, 8),
+                child: Row(children: [
+                  Expanded(child: GestureDetector(
+                    onTap: () => setState(() => _showTyping = false),
+                    child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: !_showTyping ? kBlue : kBlueLight,
+                        borderRadius: BorderRadius.circular(12)),
+                      child: Center(child: Text('약어 테스트',
+                          style: TextStyle(color: !_showTyping ? Colors.white : kBlue,
+                              fontWeight: FontWeight.w700, fontSize: 14)))))),
+                  const SizedBox(width: 8),
+                  Expanded(child: GestureDetector(
+                    onTap: () => setState(() => _showTyping = true),
+                    child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _showTyping ? kBlue : kBlueLight,
+                        borderRadius: BorderRadius.circular(12)),
+                      child: Center(child: Text('타이핑 연습',
+                          style: TextStyle(color: _showTyping ? Colors.white : kBlue,
+                              fontWeight: FontWeight.w700, fontSize: 14)))))),
+                ])),
+            // 하단 콘텐츠
+            Expanded(child: _showTyping
+              ? const TypingPracticeScreen()
+              : _started ? (_finished ? _buildResult() : _buildQuiz())
+                         : _buildSetup()),
+          ]);
         }));
   }
 
