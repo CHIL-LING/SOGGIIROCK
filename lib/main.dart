@@ -964,30 +964,47 @@ class _Span {
 }
 
 List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
-  final normalized = raw.replaceAll(' ', '*');
-  List<_Span> parts = [_Span(text: normalized, type: 'normal')];
-  final sorted = [...abbrevs]..sort((a, b) => b.word.length.compareTo(a.word.length));
-  for (final a in sorted) {
-    final next = <_Span>[];
-    for (final p in parts) {
-      if (p.type != 'normal') { next.add(p); continue; }
-      final segs = p.text.split(a.word);
-      for (int i = 0; i < segs.length; i++) {
-        if (segs[i].isNotEmpty) next.add(_Span(text: segs[i], type: 'normal'));
-        if (i < segs.length - 1) {
-          String t = 'abbr';
-          if (a.isConcurrent) t = 'concurrent';
-          else if (a.isComposite) t = 'composite';
-          next.add(_Span(text: a.word, type: t, abbr: a));
-        }
+  final s = raw.replaceAll(' ', '*');
+  final n = s.length;
+  final words = abbrevs.where((a) => a.word.isNotEmpty).toList();
+  // dp[i] = s[i..] 에서 얻을 수 있는 최선의 조합
+  // 1순위: 표시되는 약어 개수가 많을수록, 2순위: 약어가 덮는 글자 수가 많을수록
+  final cnt = List<int>.filled(n + 1, 0);
+  final cov = List<int>.filled(n + 1, 0);
+  final pick = List<AbbreviationModel?>.filled(n + 1, null);
+  for (int i = n - 1; i >= 0; i--) {
+    cnt[i] = cnt[i + 1]; cov[i] = cov[i + 1]; pick[i] = null;
+    for (final a in words) {
+      final w = a.word;
+      if (!s.startsWith(w, i)) continue;
+      final j = i + w.length;
+      final c = cnt[j] + 1, v = cov[j] + w.length;
+      if (c > cnt[i] || (c == cnt[i] && v > cov[i])) {
+        cnt[i] = c; cov[i] = v; pick[i] = a;
       }
     }
-    parts = next;
   }
-  return parts.map((p) {
-    if (p.type == 'normal') return _Span(text: p.text.replaceAll('*', ' '), type: 'normal');
-    return _Span(text: p.text.replaceAll('*', ' '), type: p.type, abbr: p.abbr);
-  }).toList();
+  final parts = <_Span>[];
+  final buf = StringBuffer();
+  void flush() {
+    if (buf.isNotEmpty) {
+      parts.add(_Span(text: buf.toString().replaceAll('*', ' '), type: 'normal'));
+      buf.clear();
+    }
+  }
+  int i = 0;
+  while (i < n) {
+    final a = pick[i];
+    if (a == null) { buf.write(s[i]); i++; continue; }
+    flush();
+    String t = 'abbr';
+    if (a.isConcurrent) t = 'concurrent';
+    else if (a.isComposite) t = 'composite';
+    parts.add(_Span(text: a.word.replaceAll('*', ' '), type: t, abbr: a));
+    i += a.word.length;
+  }
+  flush();
+  return parts;
 }
 
 int _similarity(String word, String query) {
