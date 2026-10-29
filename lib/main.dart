@@ -1864,6 +1864,9 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   OverlayEntry? _tooltipOverlay;
   final Set<String> _gridSelected = {};
   bool _gridSelectMode = false;
+  final _foundSearchCtrl = TextEditingController();
+  String _foundQuery = '';
+  bool _foundExpanded = false;
 
   void _toggleGridSelectMode() => setState(() { _gridSelectMode = !_gridSelectMode; _gridSelected.clear(); });
   void _toggleGridSelect(String id) => setState(() {
@@ -1889,6 +1892,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   @override
   void dispose() {
     _focusNode.dispose();
+    _foundSearchCtrl.dispose();
     _tooltipOverlay?.remove();
     TtsController.instance.stop();
     super.dispose();
@@ -1968,6 +1972,14 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
             ? parts.where((p) => p.type != 'normal').map((p) => p.abbr!).toSet().toList()
             : <AbbreviationModel>[];
         final plainText = parts.map((p) => p.text).join();
+        final fq = _foundQuery.trim().toLowerCase();
+        final shown = fq.isEmpty ? found : found.where((a) {
+          final hay = [a.displayWord.replaceAll('*', ' '), a.strokeDisplay,
+            ...a.groupIds.map((id) => Store.findGroup(id)?.name ?? '')].join(' ').toLowerCase();
+          return hay.contains(fq);
+        }).toList();
+        const int kFoundCollapsed = 6; // 3칸 x 2줄
+        final visibleCount = (_foundExpanded || shown.length <= kFoundCollapsed) ? shown.length : kFoundCollapsed;
 
         return GestureDetector(
           onTap: () { _closeTooltip(); FocusScope.of(context).requestFocus(_focusNode); },
@@ -2003,7 +2015,10 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                   },
                   child: TextField(controller: _analyzerCtrl, focusNode: _focusNode,
                     minLines: _analyzerAnalyzed ? 3 : 10, maxLines: _analyzerAnalyzed ? 3 : 10,
-                    onChanged: (_) => setState(() => _analyzerAnalyzed = false),
+                    onChanged: (_) => setState(() {
+                      _analyzerAnalyzed = false;
+                      _foundQuery = ''; _foundSearchCtrl.clear(); _foundExpanded = false;
+                    }),
                     decoration: InputDecoration(hintText: '분석할 문장을 입력하세요... (Ctrl+Enter로 분석)',
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue))))),
@@ -2042,8 +2057,28 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                     TtsControlBar(text: plainText),
                     if (found.isNotEmpty) ...[
                       const SizedBox(height: 14),
+                      SizedBox(height: 38, child: TextField(
+                        controller: _foundSearchCtrl,
+                        onChanged: (v) => setState(() => _foundQuery = v),
+                        style: const TextStyle(fontSize: 13),
+                        decoration: InputDecoration(
+                          isDense: true,
+                          hintText: '사용된 약어 검색 (약어·운지·그룹)',
+                          hintStyle: const TextStyle(fontSize: 12, color: Colors.grey),
+                          prefixIcon: const Icon(Icons.search, size: 18, color: Colors.grey),
+                          prefixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                          suffixIcon: _foundQuery.isEmpty ? null : GestureDetector(
+                            onTap: () => setState(() { _foundQuery = ''; _foundSearchCtrl.clear(); }),
+                            child: const Icon(Icons.close, size: 16, color: Colors.grey)),
+                          suffixIconConstraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+                          contentPadding: const EdgeInsets.symmetric(vertical: 8, horizontal: 8),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                              borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                              borderSide: const BorderSide(color: kBlue))))),
+                      const SizedBox(height: 10),
                       Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                        Text('사용된 약어 (${found.length}개)',
+                        Text(fq.isEmpty ? '사용된 약어 (${found.length}개)' : '사용된 약어 (${shown.length}/${found.length}개)',
                             style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.grey)),
                         Row(children: [
                           if (_gridSelectMode) ...[
@@ -2064,7 +2099,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                                 child: const Icon(Icons.checklist_rounded, size: 16, color: Colors.grey))),
                             IconButton(icon: const Icon(Icons.copy, size: 16, color: Colors.grey),
                               onPressed: () {
-                                final t = found.map((a) => '${a.displayWord}: ${a.strokeDisplay}').join('\n');
+                                final t = shown.map((a) => '${a.displayWord}: ${a.strokeDisplay}').join('\n');
                                 Clipboard.setData(ClipboardData(text: t));
                                 ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
                                     content: Text('약어 목록이 복사되었습니다'), backgroundColor: kBlue,
@@ -2081,56 +2116,84 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                             const SizedBox(width: 12),
                             GestureDetector(
                               onTap: () => setState(() {
-                                if (_gridSelected.length == found.length) _gridSelected.clear();
-                                else _gridSelected.addAll(found.map((a) => a.id));
+                                final allSel = shown.isNotEmpty && shown.every((a) => _gridSelected.contains(a.id));
+                                if (allSel) _gridSelected.removeAll(shown.map((a) => a.id));
+                                else _gridSelected.addAll(shown.map((a) => a.id));
                               }),
-                              child: Text(_gridSelected.length == found.length ? '전체 해제' : '전체 선택',
+                              child: Text((shown.isNotEmpty && shown.every((a) => _gridSelected.contains(a.id))) ? '전체 해제' : '전체 선택',
                                   style: const TextStyle(fontSize: 12, color: Colors.grey))),
                           ])),
+                      if (shown.isEmpty)
+                        const Padding(padding: EdgeInsets.symmetric(vertical: 12),
+                          child: Center(child: Text('검색 결과가 없습니다',
+                              style: TextStyle(fontSize: 12, color: Colors.grey)))),
                       GridView.builder(shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
                         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                            crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6, childAspectRatio: 1.6),
-                        itemCount: found.length,
+                            crossAxisCount: 3, crossAxisSpacing: 6, mainAxisSpacing: 6, mainAxisExtent: 40),
+                        itemCount: visibleCount,
                         itemBuilder: (ctx, i) {
-                          final a = found[i];
+                          final a = shown[i];
                           final isSelected = _gridSelected.contains(a.id);
                           final aGroups = a.groupIds.map((id) => Store.findGroup(id)).whereType<GroupModel>().toList();
                           return GestureDetector(
                             onTap: _gridSelectMode ? () => _toggleGridSelect(a.id) : null,
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                               decoration: BoxDecoration(
                                 color: isSelected ? kBlueLight : Colors.white,
                                 borderRadius: BorderRadius.circular(8),
                                 border: Border.all(color: isSelected ? kBlue : const Color(0xFFEEF0F8),
                                     width: isSelected ? 1.5 : 1)),
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
+                              child: LayoutBuilder(builder: (ctx2, cons) => Column(
+                                crossAxisAlignment: CrossAxisAlignment.start, mainAxisAlignment: MainAxisAlignment.center, children: [
                                 Row(children: [
                                   if (_gridSelectMode) ...[
                                     Icon(isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
                                         size: 12, color: isSelected ? kBlue : Colors.grey),
                                     const SizedBox(width: 3),
                                   ],
-                                  Flexible(child: Text(a.displayWord.replaceAll('*', ' '),
-                                      style: TextStyle(color: a.typeColor, fontWeight: FontWeight.w700, fontSize: 12),
-                                      overflow: TextOverflow.ellipsis)),
-                                ]),
-                                Wrap(spacing: 2, children: [
-                                  ...a.typeLabels.map((l) {
-                                    final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
-                                    return Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
-                                      decoration: BoxDecoration(color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
-                                      child: Text(l, style: TextStyle(fontSize: 8, color: c, fontWeight: FontWeight.w700)));
-                                  }),
-                                  ...aGroups.map((group) => Container(padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
-                                    decoration: BoxDecoration(color: group.color.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
-                                    child: Text(group.name, style: TextStyle(fontSize: 8, color: group.color, fontWeight: FontWeight.w700)))),
+                                  ConstrainedBox(
+                                    constraints: BoxConstraints(maxWidth: cons.maxWidth * 0.6),
+                                    child: Text(a.displayWord.replaceAll('*', ' '),
+                                        style: TextStyle(color: a.typeColor, fontWeight: FontWeight.w700, fontSize: 12),
+                                        overflow: TextOverflow.ellipsis, maxLines: 1)),
+                                  const SizedBox(width: 4),
+                                  Expanded(child: ClipRect(child: SingleChildScrollView(
+                                    scrollDirection: Axis.horizontal, physics: const NeverScrollableScrollPhysics(),
+                                    child: Row(children: [
+                                      ...a.typeLabels.map((l) {
+                                        final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
+                                        return Container(margin: const EdgeInsets.only(right: 2),
+                                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                                          decoration: BoxDecoration(color: c.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
+                                          child: Text(l, style: TextStyle(fontSize: 8, color: c, fontWeight: FontWeight.w700)));
+                                      }),
+                                      ...aGroups.map((group) => Container(margin: const EdgeInsets.only(right: 2),
+                                        padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                                        decoration: BoxDecoration(color: group.color.withOpacity(0.1), borderRadius: BorderRadius.circular(3)),
+                                        child: Text(group.name, style: TextStyle(fontSize: 8, color: group.color, fontWeight: FontWeight.w700)))),
+                                    ])))),
                                 ]),
                                 if (a.strokeDisplay.isNotEmpty)
                                   Text(a.strokeDisplay, style: const TextStyle(fontSize: 9, color: Colors.grey),
                                       overflow: TextOverflow.ellipsis, maxLines: 1),
-                              ])));
+                              ]))));
                         }),
+                      if (shown.length > kFoundCollapsed)
+                        GestureDetector(
+                          onTap: () => setState(() => _foundExpanded = !_foundExpanded),
+                          child: Container(
+                            width: double.infinity,
+                            margin: const EdgeInsets.only(top: 8),
+                            padding: const EdgeInsets.symmetric(vertical: 8),
+                            decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
+                                borderRadius: BorderRadius.circular(8), border: Border.all(color: const Color(0xFFEEF0F8))),
+                            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                              Text(_foundExpanded ? '접기' : '더보기 (+${shown.length - kFoundCollapsed}개)',
+                                  style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
+                              Icon(_foundExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                                  size: 16, color: kBlue),
+                            ]))),
                       const SizedBox(height: 16),
                     ],
                   ],
@@ -2140,7 +2203,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
   }
 }
 
-// ── TTS 하이라이트 분석 텍스트 뷰 (탭하면 그 위치부터 재생) ──────────
+// ── TTS 하이라이트 분석 텍스트 뷰 (더블클릭하면 그 위치부터 재생) ──────────
 class TtsAnalysisTextView extends StatefulWidget {
   final List<_Span> parts;
   final AbbreviationModel? selectedAbbr;
@@ -2181,7 +2244,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
           alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
           child: GestureDetector(
             onTapUp: (d) => widget.onAbbrTap(p.abbr!, d.globalPosition),
-            onLongPress: () => TtsController.instance.seekAndPlay(spanStart),
+            onDoubleTap: () => TtsController.instance.seekAndPlay(spanStart),
             child: Container(
               decoration: BoxDecoration(
                 color: isHighlighted ? kBlue.withOpacity(0.18)
@@ -2207,7 +2270,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
             children.add(WidgetSpan(
               alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
               child: GestureDetector(
-                onTap: () => TtsController.instance.seekAndPlay(pieceStart),
+                onDoubleTap: () => TtsController.instance.seekAndPlay(pieceStart),
                 child: Container(
                   decoration: BoxDecoration(
                     color: pieceHighlighted ? kBlue.withOpacity(0.18) : null,
