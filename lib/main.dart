@@ -15,7 +15,9 @@ void main() async {
   await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
   await Hive.openBox('quizWrongLog'); // 테스트 오답 기록(역대 통계용)
+  await Hive.openBox('typingSessions'); // 순공시간(타이핑) 세션 기록
   TtsController.instance._init(); // Hive 열린 후 설정 로드
+  await TypingTracker.instance.init(); // 지난 실행에서 저장 못 한 세션 복구
   runApp(const SoggiApp());
 }
 
@@ -26,6 +28,10 @@ const Color kBlueDark    = Color(0xFF0F4AB3);
 const Color kPurple      = Color(0xFF6a8fa9);
 const Color kPurpleLight = Color(0xFFF3EFFE);
 const Color kTimerBg     = Color(0xFFBED3F7);
+
+// 리마인드 → 테스트 이동 시 새 화면을 덮지 않고 하단 바가 있는 테스트 탭으로 전환하기 위한 알림자
+final ValueNotifier<int?> kTabRequest = ValueNotifier<int?>(null);
+final ValueNotifier<List<AbbreviationModel>?> kQuizPreset = ValueNotifier<List<AbbreviationModel>?>(null);
 
 const List<Color> kGroupColors = [
   Color(0xFF1A6CF6), Color(0xFFE53935), Color(0xFF43A047),
@@ -455,6 +461,172 @@ class StudyTimer extends ChangeNotifier {
       date: key, studyHours: hours, studyMinutes: minutes,
       speechChars: ex?.speechChars, essayChars: ex?.essayChars,
       wpm: ex?.wpm, memo: ex?.memo ?? ''));
+  }
+}
+
+// ── 순공시간(순수 타이핑 시간) ───────────────────────────────────────────────
+// 연습장에서 타이핑한 시간만 측정한다. 키를 누르고 있던 시간을 합산하는 방식이 아니라,
+// 연속해서 타이핑한 경과 시간을 잰다: 키 입력 사이 간격이 kTypingIdleMs 이하면 그 간격 전체를 더하고,
+// 그보다 길면 쉬는 시간으로 보고 제외한다.
+const int kTypingIdleMs = 5000;
+const String kTypingOpenKey = '__open__';
+
+class TypingSession {
+  final String id, date;
+  final int startMs, endMs, activeMs, chars;
+  const TypingSession({required this.id, required this.date, required this.startMs,
+    required this.endMs, required this.activeMs, required this.chars});
+  Map<String, dynamic> toMap() => {'id': id, 'date': date, 'startMs': startMs,
+    'endMs': endMs, 'activeMs': activeMs, 'chars': chars};
+  factory TypingSession.fromMap(Map m) => TypingSession(
+    id: m['id'] as String, date: m['date'] as String,
+    startMs: (m['startMs'] as num).toInt(), endMs: (m['endMs'] as num).toInt(),
+    activeMs: (m['activeMs'] as num).toInt(), chars: ((m['chars'] as num?) ?? 0).toInt());
+}
+
+// 새벽 5시 이전은 전날로 취급 (기존 공부 기록과 같은 기준)
+String _dateKeyFromMs(int ms) {
+  final d = DateTime.fromMillisecondsSinceEpoch(ms);
+  final base = d.hour < 5 ? d.subtract(const Duration(days: 1)) : d;
+  return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+}
+
+// 00:12.3 (1시간 이상이면 01:02:03.4)
+String formatTypingClock(int ms) {
+  final totalTenths = ms ~/ 100;
+  final t = totalTenths % 10;
+  final sec = (totalTenths ~/ 10) % 60;
+  final min = (totalTenths ~/ 600) % 60;
+  final h = totalTenths ~/ 36000;
+  final core = '${min.toString().padLeft(2,'0')}:${sec.toString().padLeft(2,'0')}.$t';
+  return h > 0 ? '${h.toString().padLeft(2,'0')}:$core' : core;
+}
+
+// 1시간 02분 03.456초 (밀리초까지)
+String formatTypingLong(int ms) {
+  final h = ms ~/ 3600000;
+  final m = (ms % 3600000) ~/ 60000;
+  final sec = ((ms % 60000) / 1000).toStringAsFixed(3);
+  if (h > 0) return '$h시간 ${m.toString().padLeft(2,'0')}분 $sec초';
+  if (m > 0) return '$m분 $sec초';
+  return '$sec초';
+}
+
+// 합계용 요약: 2시간 10분 / 3분 12초 / 8.4초
+String formatTypingTotal(int ms) {
+  final h = ms ~/ 3600000;
+  final m = (ms % 3600000) ~/ 60000;
+  final s = (ms % 60000) ~/ 1000;
+  if (h > 0) return '$h시간 $m분';
+  if (m > 0) return '$m분 $s초';
+  return '${(ms / 1000).toStringAsFixed(1)}초';
+}
+
+class TypingStore {
+  static List<TypingSession> all() {
+    final b = Hive.box('typingSessions');
+    final out = <TypingSession>[];
+    for (final k in b.keys) {
+      if (k == kTypingOpenKey) continue;
+      final v = b.get(k);
+      if (v is Map) {
+        try { out.add(TypingSession.fromMap(Map.from(v))); } catch (_) {}
+      }
+    }
+    out.sort((a, b) => a.startMs.compareTo(b.startMs));
+    return out;
+  }
+  static List<TypingSession> forDate(String date) => all().where((s) => s.date == date).toList();
+  static Set<String> dates() => all().map((s) => s.date).toSet();
+  static Future<void> delete(String id) => Hive.box('typingSessions').delete(id);
+}
+
+class TypingTracker extends ChangeNotifier with WidgetsBindingObserver {
+  static final TypingTracker instance = TypingTracker._();
+  TypingTracker._();
+
+  Box get _box => Hive.box('typingSessions');
+  bool _active = false;
+  int _startMs = 0, _lastKeyMs = 0, _activeMs = 0, _chars = 0, _prevLen = 0, _lastCheckpointMs = 0;
+  Timer? _ticker;
+
+  bool get active => _active;
+  int get activeMs => _activeMs;
+  int get chars => _chars;
+  int get startMs => _startMs;
+  bool get isTypingNow => _active && DateTime.now().millisecondsSinceEpoch - _lastKeyMs < 2000;
+
+  Future<void> init() async {
+    WidgetsBinding.instance.addObserver(this);
+    // 앱이 갑자기 꺼져서 정상 종료되지 못한 세션이 있으면 마지막 기록 시점까지 저장
+    final open = _box.get(kTypingOpenKey);
+    if (open is Map) {
+      try {
+        final m = Map<String, dynamic>.from(open);
+        final ms = (m['activeMs'] as num).toInt();
+        final start = (m['startMs'] as num).toInt();
+        if (ms > 0) {
+          final sess = TypingSession(id: m['id'] as String, date: _dateKeyFromMs(start), startMs: start,
+              endMs: (m['lastKeyMs'] as num).toInt(), activeMs: ms, chars: ((m['chars'] as num?) ?? 0).toInt());
+          await _box.put(sess.id, sess.toMap());
+        }
+      } catch (_) {}
+      await _box.delete(kTypingOpenKey);
+    }
+  }
+
+  // 연습장 글자 수를 직접 바꿨을 때(불러오기/지우기) 입력으로 세지 않도록 기준 길이를 맞춤
+  void syncLength(int len) => _prevLen = len;
+
+  // 연습장에서 글자가 바뀔 때마다 호출
+  void onTextChanged(String text) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!_active) {
+      _active = true;
+      _startMs = now; _lastKeyMs = now; _activeMs = 0; _chars = 0; _lastCheckpointMs = 0;
+      _ticker?.cancel();
+      _ticker = Timer.periodic(const Duration(milliseconds: 500), (_) => notifyListeners());
+    } else {
+      final gap = now - _lastKeyMs;
+      if (gap <= kTypingIdleMs) _activeMs += gap;
+      _lastKeyMs = now;
+    }
+    final delta = text.length - _prevLen;
+    _prevLen = text.length;
+    if (delta > 0) _chars += delta;
+    if (now - _lastCheckpointMs > 3000) _writeCheckpoint();
+    notifyListeners();
+  }
+
+  // 진행 중인 세션을 임시 저장 (앱이 꺼져도 다음 실행 때 복구)
+  void _writeCheckpoint() {
+    if (!_active) return;
+    _lastCheckpointMs = DateTime.now().millisecondsSinceEpoch;
+    _box.put(kTypingOpenKey, {'id': 'ts_$_startMs', 'startMs': _startMs,
+      'lastKeyMs': _lastKeyMs, 'activeMs': _activeMs, 'chars': _chars});
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) _writeCheckpoint();
+  }
+
+  // 종료 → 세션 저장
+  Future<TypingSession?> finish() async {
+    if (!_active) return null;
+    final sess = TypingSession(id: 'ts_$_startMs', date: _dateKeyFromMs(_startMs), startMs: _startMs,
+        endMs: _lastKeyMs, activeMs: _activeMs, chars: _chars);
+    _active = false;
+    _ticker?.cancel(); _ticker = null;
+    TypingSession? saved;
+    if (sess.activeMs > 0) {
+      await _box.put(sess.id, sess.toMap());
+      saved = sess;
+    }
+    await _box.delete(kTypingOpenKey);
+    _activeMs = 0; _chars = 0;
+    notifyListeners();
+    return saved;
   }
 }
 
@@ -968,7 +1140,7 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   final n = s.length;
   final words = abbrevs.where((a) => a.word.isNotEmpty).toList();
   // dp[i] = s[i..] 에서 얻을 수 있는 최선의 조합
-  // 1순위: 표시되는 약어 개수가 많을수록, 2순위: 약어가 덮는 글자 수가 많을수록
+  // 1순위: 약어가 덮는 글자 수가 많을수록, 2순위(덮는 글자 수가 같으면): 약어 조각 수가 적을수록(= 긴 약어 우선)
   final cnt = List<int>.filled(n + 1, 0);
   final cov = List<int>.filled(n + 1, 0);
   final pick = List<AbbreviationModel?>.filled(n + 1, null);
@@ -979,7 +1151,7 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
       if (!s.startsWith(w, i)) continue;
       final j = i + w.length;
       final c = cnt[j] + 1, v = cov[j] + w.length;
-      if (c > cnt[i] || (c == cnt[i] && v > cov[i])) {
+      if (v > cov[i] || (v == cov[i] && c < cnt[i])) {
         cnt[i] = c; cov[i] = v; pick[i] = a;
       }
     }
@@ -1124,10 +1296,19 @@ class _MainShellState extends State<MainShell> with SingleTickerProviderStateMix
       ..repeat(reverse: true);
     _blinkAnim = Tween<double>(begin: 0.4, end: 1.0).animate(_blinkCtrl);
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkTodayReminders());
+    kTabRequest.addListener(_onTabRequest);
+  }
+
+  void _onTabRequest() {
+    final v = kTabRequest.value;
+    if (v == null) return;
+    kTabRequest.value = null;
+    if (mounted) setState(() => _idx = v);
   }
 
   @override
   void dispose() {
+    kTabRequest.removeListener(_onTabRequest);
     _blinkCtrl.dispose();
     super.dispose();
   }
@@ -1418,6 +1599,7 @@ class HomeScreen extends StatefulWidget {
 }
 class _HomeScreenState extends State<HomeScreen> {
   late DateTime _month; String? _selected;
+  final _typingL = Hive.box('typingSessions').listenable(); // 순공시간 저장 시 달력 점 갱신용
   @override
   void initState() {
     super.initState();
@@ -1425,8 +1607,13 @@ class _HomeScreenState extends State<HomeScreen> {
     _month = DateTime(now.year, now.month);
     _selected = _todayKey();
     StudyTimer.instance.addListener(_onTick);
+    _typingL.addListener(_onTick);
   }
-  @override void dispose() { StudyTimer.instance.removeListener(_onTick); super.dispose(); }
+  @override void dispose() {
+    StudyTimer.instance.removeListener(_onTick);
+    _typingL.removeListener(_onTick);
+    super.dispose();
+  }
   void _onTick() { if (mounted) setState(() {}); }
   String _todayKey() {
     final now = DateTime.now();
@@ -1444,6 +1631,7 @@ class _HomeScreenState extends State<HomeScreen> {
         final daysInMonth = DateTime(_month.year, _month.month + 1, 0).day;
         final firstWeekday = DateTime(_month.year, _month.month, 1).weekday % 7;
         final markedDates = Store.getRecordsWithData().map((r) => r.date).toSet();
+        final typingDates = TypingStore.dates();
         final timer = StudyTimer.instance;
         final calW = (MediaQuery.of(context).size.width * 0.85).clamp(0.0, 340.0);
         return Scaffold(backgroundColor: Colors.white,
@@ -1499,6 +1687,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       Text('$day', style: TextStyle(fontSize: 12,
                         fontWeight: isSel || marked ? FontWeight.w700 : FontWeight.w400,
                         color: isSel ? Colors.white : marked ? kBlueDark : Colors.black87)),
+                      if (typingDates.contains(key))
+                        Positioned(bottom: 2, child: Container(width: 4, height: 4,
+                          decoration: BoxDecoration(color: isSel ? Colors.white : kPurple, shape: BoxShape.circle))),
                     ]));
                 }),
             ]))),
@@ -1522,6 +1713,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   ]),
                 ]))),
             const SizedBox(height: 10),
+            _TypingTimeCard(dateKey: _selected ?? _todayKey(), todayKey: _todayKey()),
+            const SizedBox(height: 10),
             Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(16)),
@@ -1537,6 +1730,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7)),
                         child: const Text('기록 추가', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
                     ]))),
+            const SizedBox(height: 10),
+            const _PracticePad(),
             const SizedBox(height: 10),
             // 오늘 테스트 정답률 카드
             Builder(builder: (_) {
@@ -1715,6 +1910,163 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
+// ── 순공시간 카드 (선택한 날짜의 타이핑 순공시간 + 세션 기록) ──────────────────
+class _TypingTimeCard extends StatefulWidget {
+  final String dateKey, todayKey;
+  const _TypingTimeCard({required this.dateKey, required this.todayKey});
+  @override State<_TypingTimeCard> createState() => _TypingTimeCardState();
+}
+class _TypingTimeCardState extends State<_TypingTimeCard> {
+  bool _open = false;
+  String _hm(int ms) {
+    final d = DateTime.fromMillisecondsSinceEpoch(ms);
+    return '${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
+  }
+  void _confirmDelete(BuildContext context, TypingSession s) {
+    showDialog(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('순공시간 기록 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)} (${formatTypingLong(s.activeMs)}) 기록을 삭제할까요?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+          onPressed: () async { await TypingStore.delete(s.id); if (ctx.mounted) Navigator.pop(ctx); },
+          child: const Text('삭제')),
+      ]));
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([TypingTracker.instance, Hive.box('typingSessions').listenable()]),
+    builder: (context, _) {
+      final tr = TypingTracker.instance;
+      final sessions = TypingStore.forDate(widget.dateKey);
+      final liveHere = tr.active && _dateKeyFromMs(tr.startMs) == widget.dateKey;
+      final total = sessions.fold<int>(0, (a, s) => a + s.activeMs) + (liveHere ? tr.activeMs : 0);
+      final count = sessions.length + (liveHere ? 1 : 0);
+      final isToday = widget.dateKey == widget.todayKey;
+      const textColor = Color(0xFF3E566B);
+      return Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(color: kPurpleLight, borderRadius: BorderRadius.circular(16)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.keyboard_rounded, color: kPurple, size: 26),
+              const SizedBox(width: 10),
+              Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(isToday ? '순공시간 (오늘)' : '순공시간 (${widget.dateKey})',
+                    style: const TextStyle(fontSize: 11, color: textColor)),
+                Text(formatTypingClock(total),
+                    style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: textColor, letterSpacing: 1)),
+              ])),
+              if (count > 0)
+                GestureDetector(
+                  onTap: () => setState(() => _open = !_open),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Text('기록 $count개', style: const TextStyle(fontSize: 12, color: textColor, fontWeight: FontWeight.w600)),
+                    Icon(_open ? Icons.expand_less_rounded : Icons.expand_more_rounded, size: 18, color: textColor),
+                  ])),
+            ]),
+            if (_open && count > 0) ...[
+              const SizedBox(height: 8),
+              if (liveHere)
+                Padding(padding: const EdgeInsets.only(bottom: 6),
+                  child: Text('진행 중  ${_hm(tr.startMs)} ~  ·  ${formatTypingLong(tr.activeMs)}  ·  ${tr.chars}자  (종료하면 저장돼요)',
+                      style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
+              ...sessions.reversed.map((s) => Padding(padding: const EdgeInsets.only(bottom: 6),
+                child: Row(children: [
+                  Expanded(child: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)}  ·  ${formatTypingLong(s.activeMs)}  ·  ${s.chars}자',
+                      style: const TextStyle(fontSize: 12, color: textColor))),
+                  GestureDetector(onTap: () => _confirmDelete(context, s),
+                    child: const Padding(padding: EdgeInsets.only(left: 8),
+                      child: Icon(Icons.delete_outline_rounded, size: 16, color: Colors.grey))),
+                ]))),
+            ],
+          ])));
+    });
+}
+
+// ── 연습장 (여기서 타이핑한 시간만 순공시간으로 기록) ───────────────────────────
+class _PracticePad extends StatefulWidget {
+  const _PracticePad();
+  @override State<_PracticePad> createState() => _PracticePadState();
+}
+class _PracticePadState extends State<_PracticePad> {
+  late final TextEditingController _ctrl;
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: (Hive.box('settings').get('practice_pad') as String?) ?? '');
+    TypingTracker.instance.syncLength(_ctrl.text.length);
+  }
+  @override void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  Future<void> _finish() async {
+    final sess = await TypingTracker.instance.finish();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(sess == null ? '저장할 순공시간이 없어요' : '순공시간 ${formatTypingLong(sess.activeMs)} 저장됨'),
+      backgroundColor: kBlue, duration: const Duration(seconds: 2)));
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+    child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFEEF0F8))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) {
+          final tr = TypingTracker.instance;
+          final typingNow = tr.isTypingNow;
+          final status = !tr.active ? '세션 없음' : typingNow ? '● 타이핑 중' : '⏸ 대기 중';
+          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              const Icon(Icons.edit_note_rounded, color: kBlue, size: 20),
+              const SizedBox(width: 6),
+              const Text('연습장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+              const Spacer(),
+              Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(color: typingNow ? kBlue.withOpacity(0.12) : const Color(0xFFF0F0F5),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Text(status, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                    color: typingNow ? kBlue : Colors.grey))),
+            ]),
+            if (tr.active)
+              Padding(padding: const EdgeInsets.only(top: 6),
+                child: Text('이번 순공 ${formatTypingClock(tr.activeMs)}  ·  입력 ${tr.chars}자',
+                    style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
+          ]);
+        }),
+        const SizedBox(height: 8),
+        TextField(controller: _ctrl, minLines: 6, maxLines: 14,
+          onChanged: (v) {
+            TypingTracker.instance.onTextChanged(v);
+            Hive.box('settings').put('practice_pad', v);
+          },
+          decoration: InputDecoration(hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: kBlue)),
+            contentPadding: const EdgeInsets.all(12))),
+        const SizedBox(height: 6),
+        Row(children: [
+          TextButton(
+            onPressed: () {
+              setState(() => _ctrl.clear());
+              TypingTracker.instance.syncLength(0);
+              Hive.box('settings').put('practice_pad', '');
+            },
+            child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+          const Spacer(),
+          AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) => ElevatedButton.icon(
+            onPressed: TypingTracker.instance.active ? _finish : null,
+            icon: const Icon(Icons.stop_rounded, size: 16),
+            label: const Text('종료·저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
+        ]),
+      ])));
+}
+
 class _TimerBtn extends StatelessWidget {
   final IconData icon; final VoidCallback onTap;
   const _TimerBtn({required this.icon, required this.onTap});
@@ -1779,7 +2131,39 @@ class GraphScreen extends StatefulWidget {
 }
 class _GraphScreenState extends State<GraphScreen> {
   String _period = 'week', _filter = 'wpm';
+  // 순공시간(분): 1주 = 요일별 합계, 1달 = 6일 단위 합계, 1년 = 월별 합계
+  List<_BD> _typingData() {
+    final sessions = TypingStore.all(); final now = DateTime.now();
+    double minutesWhere(bool Function(TypingSession) test) =>
+        sessions.where(test).fold<int>(0, (a, s) => a + s.activeMs) / 60000.0;
+    String key(DateTime d) => '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+    if (_period == 'week') {
+      final mon = now.subtract(Duration(days: now.weekday - 1)); const days = ['월','화','수','목','금','토','일'];
+      return List.generate(7, (i) {
+        final k = key(mon.add(Duration(days: i)));
+        final v = minutesWhere((s) => s.date == k);
+        return _BD(label: days[i], value: v > 0 ? v : null);
+      });
+    } else if (_period == 'month') {
+      return [[1,6],[7,12],[13,18],[19,24],[25,31]].map((r) {
+        final v = minutesWhere((s) {
+          final p = s.date.split('-');
+          final d = int.parse(p[2]);
+          return int.parse(p[0]) == now.year && int.parse(p[1]) == now.month && d >= r[0] && d <= r[1];
+        });
+        return _BD(label: '${r[0]}~${r[1]}일', value: v > 0 ? v : null);
+      }).toList();
+    }
+    return List.generate(12, (i) {
+      final v = minutesWhere((s) {
+        final p = s.date.split('-');
+        return int.parse(p[0]) == now.year && int.parse(p[1]) == i + 1;
+      });
+      return _BD(label: '${i + 1}월', value: v > 0 ? v : null);
+    });
+  }
   List<_BD> _getData() {
+    if (_filter == 'typing') return _typingData();
     final recs = Store.getRecordsWithData(); final now = DateTime.now();
     double? val(StudyRecordModel r) { switch (_filter) {
       case 'wpm': return r.wpm?.toDouble(); case 'speech': return r.speechChars?.toDouble();
@@ -1820,7 +2204,8 @@ class _GraphScreenState extends State<GraphScreen> {
             _PB(label:'타수',value:'wpm',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
             _PB(label:'연설',value:'speech',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
             _PB(label:'논술',value:'essay',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
-            _PB(label:'시간',value:'time',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),
+            _PB(label:'시간',value:'time',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
+            _PB(label:'순공',value:'typing',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),
           ]),
           const SizedBox(height:8),
           Row(children: [
@@ -1829,11 +2214,15 @@ class _GraphScreenState extends State<GraphScreen> {
             _PB(label:'1년',value:'year',sel:_period,onTap:(v)=>setState(()=>_period=v)),
           ]),
         ]),
+        if (_filter == 'typing') Padding(padding: const EdgeInsets.only(top: 12),
+          child: Align(alignment: Alignment.centerLeft,
+            child: Text('이 기간 총 순공시간  ${formatTypingTotal((data.fold<double>(0, (a, d) => a + (d.value ?? 0)) * 60000).round())}   (막대 단위: 분)',
+                style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700)))),
         const SizedBox(height:24),
         Expanded(child:data.every((d)=>d.value==null)?const Center(child:Text('기록이 없습니다',style:TextStyle(color:Colors.grey))):Row(crossAxisAlignment:CrossAxisAlignment.end,children:data.map((d){
           final ratio=d.value!=null?d.value!/chartMax:0.0;
           return Expanded(child:Padding(padding:const EdgeInsets.symmetric(horizontal:3),child:Column(mainAxisAlignment:MainAxisAlignment.end,children:[
-            if(d.value!=null)Text(d.value!.round().toString(),style:const TextStyle(fontSize:10,color:kBlue,fontWeight:FontWeight.w700)),
+            if(d.value!=null)Text(_filter=='typing'?d.value!.toStringAsFixed(1):d.value!.round().toString(),style:const TextStyle(fontSize:10,color:kBlue,fontWeight:FontWeight.w700)),
             const SizedBox(height:4),
             Flexible(child:FractionallySizedBox(heightFactor:ratio>0?ratio:0.02,child:Container(decoration:BoxDecoration(color:d.value!=null?kBlue:Colors.grey[300],borderRadius:const BorderRadius.vertical(top:Radius.circular(4)))))),
             const SizedBox(height:6),
@@ -2951,31 +3340,39 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
               const SizedBox(height: 8),
               // 속기 키보드 클릭 입력
               _SoggiKeyboardInput(
+                isOn: (label, type) {
+                  final c = type == 'cho' ? row['initial'] : type == 'jung' ? row['medial'] : row['final'];
+                  return c != null && c.text.split('+').map((e) => e.trim()).contains(label);
+                },
                 onKeyTap: (label, type) {
-                  // 타입에 따라 해당 입력창에 추가
+                  // 타입에 따라 해당 입력창에 추가 (이미 눌린 키를 다시 누르면 제거)
                   TextEditingController? ctrl;
                   if (type == 'cho') ctrl = row['initial'];
                   else if (type == 'jung') ctrl = row['medial'];
                   else ctrl = row['final'];
                   if (ctrl == null) return;
-                  final cur = ctrl.text;
-                  ctrl.text = cur.isEmpty ? label : '$cur+$label';
+                  final parts = ctrl.text.split('+').map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
+                  if (parts.contains(label)) { parts.removeWhere((e) => e == label); } else { parts.add(label); }
+                  ctrl.text = parts.join('+');
                   ctrl.selection = TextSelection.collapsed(offset: ctrl.text.length);
                   setS(() {});
                 }),
               const SizedBox(height: 8),
               Row(children: [
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  _lbl('초성'), TextField(controller: row['initial'], decoration: _inputDeco(''), textInputAction: TextInputAction.next),
+                  _lbl('초성'), TextField(controller: row['initial'], decoration: _inputDeco(''), textInputAction: TextInputAction.next,
+                    onChanged: (_) => setS(() {})),
                 ])),
                 const SizedBox(width: 6),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  _lbl('중성'), TextField(controller: row['medial'], decoration: _inputDeco(''), textInputAction: TextInputAction.next),
+                  _lbl('중성'), TextField(controller: row['medial'], decoration: _inputDeco(''), textInputAction: TextInputAction.next,
+                    onChanged: (_) => setS(() {})),
                 ])),
                 const SizedBox(width: 6),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   _lbl('종성'),
                   TextField(controller: row['final'], decoration: _inputDeco(''),
+                    onChanged: (_) => setS(() {}),
                     textInputAction: i == rows.length - 1 ? TextInputAction.done : TextInputAction.next,
                     onSubmitted: i == rows.length - 1 ? (_) => saveAll() : null),
                 ])),
@@ -3214,7 +3611,8 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
 // 약어 등록 시 키보드 클릭으로 초/중/종성 입력하는 위젯
 class _SoggiKeyboardInput extends StatefulWidget {
   final void Function(String label, String type) onKeyTap;
-  const _SoggiKeyboardInput({required this.onKeyTap});
+  final bool Function(String label, String type)? isOn;
+  const _SoggiKeyboardInput({required this.onKeyTap, this.isOn});
   @override State<_SoggiKeyboardInput> createState() => _SoggiKeyboardInputState();
 }
 class _SoggiKeyboardInputState extends State<_SoggiKeyboardInput> {
@@ -3231,15 +3629,16 @@ class _SoggiKeyboardInputState extends State<_SoggiKeyboardInput> {
       ])),
     if (_show) ...[
       const SizedBox(height: 8),
-      SingleChildScrollView(scrollDirection: Axis.horizontal,
-        child: _SoggiInputKeyboard(onKeyTap: widget.onKeyTap)),
+      // 가로 스크롤로 감싸지 않아야 창 크기에 맞춰 키보드 크기가 줄어듦
+      _SoggiInputKeyboard(onKeyTap: widget.onKeyTap, isOn: widget.isOn),
     ],
   ]);
 }
 
 class _SoggiInputKeyboard extends StatelessWidget {
   final void Function(String label, String type) onKeyTap;
-  const _SoggiInputKeyboard({required this.onKeyTap});
+  final bool Function(String label, String type)? isOn;
+  const _SoggiInputKeyboard({required this.onKeyTap, this.isOn});
 
   @override
   Widget build(BuildContext context) {
@@ -3262,22 +3661,25 @@ class _SoggiInputKeyboard extends StatelessWidget {
 
     Widget buildKey(_SoggiKey k, {double w = 34, double h = 34, double fs = 13}) {
       final isThumb = k.row == 3;
-      final fgColor = keyFg(k.type == 'jong_special' ? 'jong' : k.type);
-      final bgColor = keyBg(k.type == 'jong_special' ? 'jong' : k.type);
+      final mType = k.type == 'jong_special' ? 'jong' : k.type;
+      final fgColor = keyFg(mType);
+      final bgColor = keyBg(mType);
+      final on = isOn?.call(k.label, mType) ?? false; // 눌려 있는(선택된) 키
       final br = isThumb
           ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2),
               topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
           : BorderRadius.circular(6);
       return Container(
         width: w, height: h, margin: const EdgeInsets.all(2),
-        decoration: BoxDecoration(color: bgColor, borderRadius: br,
-            border: Border.all(color: fgColor.withOpacity(0.4))),
+        decoration: BoxDecoration(color: on ? fgColor : bgColor, borderRadius: br,
+            border: Border.all(color: on ? fgColor : fgColor.withOpacity(0.4), width: on ? 1.5 : 1),
+            boxShadow: on ? [BoxShadow(color: fgColor.withOpacity(0.4), blurRadius: 4, offset: const Offset(0, 2))] : null),
         child: Material(color: Colors.transparent, borderRadius: br,
           child: InkWell(
-            onTap: () => onKeyTap(k.label, k.type == 'jong_special' ? 'jong' : k.type),
+            onTap: () => onKeyTap(k.label, mType),
             borderRadius: br, splashColor: fgColor.withOpacity(0.4), highlightColor: fgColor.withOpacity(0.2),
             child: Center(child: Text(k.label,
-                style: TextStyle(fontSize: fs, color: fgColor, fontWeight: FontWeight.w700))))));
+                style: TextStyle(fontSize: fs, color: on ? Colors.white : fgColor, fontWeight: FontWeight.w700))))));
     }
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3290,12 +3692,14 @@ class _SoggiInputKeyboard extends StatelessWidget {
       ]),
       const SizedBox(height: 6),
       LayoutBuilder(builder: (context, constraints) {
-        // 전체 키보드 너비: 사이드2 + 본체8 + 구분선1 = 11칸 × 38px + 마진
-        const baseW = 38.0 * 11 + 8;
-        final scale = (constraints.maxWidth / baseW).clamp(0.5, 1.0);
-        final kw = 38.0 * scale;
-        final kh = 38.0 * scale;
-        final fs = 13.0 * scale;
+        // 한 줄 너비 = 키 10칸(키 38*scale + 마진 4) + 구분선 8*scale = 388*scale + 40
+        // 사용 가능한 너비에 맞춰 배율을 계산해서 창이 작아지면 키보드도 같이 작아짐
+        final avail = constraints.maxWidth.isFinite ? constraints.maxWidth : 428.0;
+        final double scale = ((avail - 40) / 388).clamp(0.35, 1.0).toDouble();
+        final double kw = 38.0 * scale;
+        final double kh = 38.0 * scale;
+        final double fs = (13.0 * scale).clamp(8.0, 13.0).toDouble();
+        final double rowW = 10 * (kw + 4) + 8 * scale;
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           for (int r = 0; r < 3; r++)
             Row(mainAxisSize: MainAxisSize.min, children: [
@@ -3311,9 +3715,10 @@ class _SoggiInputKeyboard extends StatelessWidget {
               }),
             ]),
           SizedBox(height: 4 * scale),
-          Padding(padding: EdgeInsets.only(left: kw * 2.5),
+          // 엄지 모음(중성): ㅗㅏㅜ는 초성 쪽, ㅡㅓㅣ는 종성 쪽 아래에 붙어서 키보드 가운데에 정렬
+          SizedBox(width: rowW, child: Center(
             child: Row(mainAxisSize: MainAxisSize.min,
-                children: rows[3]!.map((k) => buildKey(k, w: kw + 2, h: kh * 1.2, fs: fs)).toList())),
+                children: rows[3]!.map((k) => buildKey(k, w: kw + 2, h: kh * 1.2, fs: fs)).toList()))),
         ]);
       }),
     ]);
@@ -3389,15 +3794,16 @@ Map<String, Set<String>> _decomposeSoggi(String word) {
 }
 
 class SoggiKeyboardWidget extends StatelessWidget {
-  final String word;
-  const SoggiKeyboardWidget({super.key, required this.word});
+  final AbbreviationModel abbr;
+  const SoggiKeyboardWidget({super.key, required this.abbr});
 
   @override
   Widget build(BuildContext context) {
-    final decomp = _decomposeSoggi(word);
-    final choSet = decomp['cho']!;
-    final jungSet = decomp['jung']!;
-    final jongSet = decomp['jong']!;
+    // 약어 글자에서 추측하지 않고, 내가 등록해 둔 운지(초성/중성/종성)를 그대로 표시
+    final choSet = abbr.initial.map((e) => e.trim()).toSet();
+    final jungSet = abbr.medial.map((e) => e.trim()).toSet();
+    final jongSet = abbr.final_.map((e) => e.trim()).map((e) => e == 'ㅋ' ? '(ㅋ)' : e).toSet();
+    final hasStroke = choSet.isNotEmpty || jungSet.isNotEmpty || jongSet.isNotEmpty;
 
     Color keyColor(_SoggiKey k) {
       if (k.type == 'cho' && choSet.contains(k.label)) return const Color(0xFF4A90E2);
@@ -3410,7 +3816,6 @@ class SoggiKeyboardWidget extends StatelessWidget {
       return c == Colors.transparent ? Colors.black87 : Colors.white;
     }
 
-    // 행별로 키 그룹화
     final rows = <int, List<_SoggiKey>>{};
     for (final k in _kbKeys) {
       rows.putIfAbsent(k.row, () => []).add(k);
@@ -3419,7 +3824,8 @@ class SoggiKeyboardWidget extends StatelessWidget {
       r.sort((a, b) => a.col.compareTo(b.col));
     }
 
-    Widget buildKey(_SoggiKey k, {double w = 34, double h = 34, double fs = 13, double br = 6}) {
+    const double kw = 34, kh = 34, fs = 13;
+    Widget buildKey(_SoggiKey k, {double w = kw, double h = kh}) {
       final bg = keyColor(k);
       final isThumb = k.row == 3;
       return Container(
@@ -3428,8 +3834,8 @@ class SoggiKeyboardWidget extends StatelessWidget {
         decoration: BoxDecoration(
           color: bg == Colors.transparent ? const Color(0xFFF0F0F5) : bg,
           borderRadius: isThumb
-              ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2), topLeft: Radius.circular(4), topRight: Radius.circular(4))
-              : BorderRadius.circular(br),
+              ? BorderRadius.only(bottomLeft: Radius.circular(w/2), bottomRight: Radius.circular(w/2), topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
+              : BorderRadius.circular(6),
           border: Border.all(color: bg == Colors.transparent ? const Color(0xFFDDDDE8) : bg.withOpacity(0.7)),
           boxShadow: bg != Colors.transparent ? [BoxShadow(color: bg.withOpacity(0.4), blurRadius: 4, spreadRadius: 0, offset: const Offset(0,2))] : null,
         ),
@@ -3437,39 +3843,42 @@ class SoggiKeyboardWidget extends StatelessWidget {
       );
     }
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      // 범례
-      Row(children: [
-        _kbLegend(const Color(0xFF4A90E2), '초성'),
-        const SizedBox(width: 10),
-        _kbLegend(const Color(0xFF7B5EA7), '중성'),
-        const SizedBox(width: 10),
-        _kbLegend(const Color(0xFFE2574A), '종성'),
-      ]),
-      const SizedBox(height: 8),
-      // 메인 키보드 (row 0~2)
-      for (int r = 0; r < 3; r++)
-        Row(mainAxisSize: MainAxisSize.min, children: [
-          ...rows[r]!.map((k) {
-            // 사이드 키 (col 0, col 9) 는 약간 작게
-            final isSide = k.col == 0 || k.col == 9;
-            // 왼/오른 사이드 사이 구분선
-            if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
-              return Row(mainAxisSize: MainAxisSize.min, children: [
-                Container(width: 6, height: 34, margin: const EdgeInsets.symmetric(horizontal: 2),
-                  decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
-                buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34),
-              ]);
-            }
-            return buildKey(k, w: isSide ? 28 : 34, h: isSide ? 28 : 34, fs: isSide ? 11 : 13);
-          }),
+    // 한 줄 너비: 키 10칸 x (34+4) + 구분선(6+4)
+    const double rowW = 10 * (kw + 4) + 10;
+
+    // 창이 좁으면 FittedBox가 키보드 전체를 비율대로 줄여 줌
+    return FittedBox(fit: BoxFit.scaleDown, alignment: Alignment.centerLeft,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          _kbLegend(const Color(0xFF4A90E2), '초성'),
+          const SizedBox(width: 10),
+          _kbLegend(const Color(0xFF7B5EA7), '중성'),
+          const SizedBox(width: 10),
+          _kbLegend(const Color(0xFFE2574A), '종성'),
         ]),
-      const SizedBox(height: 4),
-      // 엄지 모음 (row 3) - 중앙 정렬
-      Padding(padding: const EdgeInsets.only(left: 95),
-        child: Row(mainAxisSize: MainAxisSize.min,
-          children: rows[3]!.map((k) => buildKey(k, w: 36, h: 44, fs: 13)).toList())),
-    ]);
+        if (!hasStroke)
+          const Padding(padding: EdgeInsets.only(top: 6),
+            child: Text('등록된 운지가 없습니다', style: TextStyle(fontSize: 11, color: Colors.grey))),
+        const SizedBox(height: 8),
+        for (int r = 0; r < 3; r++)
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            ...rows[r]!.map((k) {
+              if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
+                return Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 6, height: 34, margin: const EdgeInsets.symmetric(horizontal: 2),
+                    decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
+                  buildKey(k),
+                ]);
+              }
+              return buildKey(k);
+            }),
+          ]),
+        const SizedBox(height: 4),
+        // 엄지 모음(중성): 가운데 정렬 (ㅗㅏㅜ = 초성 쪽 아래, ㅡㅓㅣ = 종성 쪽 아래, 서로 붙어 있음)
+        SizedBox(width: rowW, child: Center(
+          child: Row(mainAxisSize: MainAxisSize.min,
+            children: rows[3]!.map((k) => buildKey(k, w: kw, h: 44)).toList()))),
+      ]));
   }
 
   Widget _kbLegend(Color color, String label) => Row(mainAxisSize: MainAxisSize.min, children: [
@@ -3536,8 +3945,7 @@ class _AbbrListTileState extends State<_AbbrListTile> {
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                 title: Text(widget.abbr.displayWord.replaceAll('*',' '),
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                content: SingleChildScrollView(scrollDirection: Axis.horizontal,
-                  child: SoggiKeyboardWidget(word: widget.abbr.word)),
+                content: SoggiKeyboardWidget(abbr: widget.abbr),
                 actions: [TextButton(onPressed: () => Navigator.pop(context),
                     child: const Text('닫기', style: TextStyle(color: Colors.grey)))],
               ))),
@@ -3582,6 +3990,41 @@ class _ToggleChip extends StatelessWidget {
         if (icon != null) ...[Icon(icon, size: 14, color: selected ? color : Colors.grey), const SizedBox(width: 4)],
         Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: selected ? color : Colors.grey)),
       ])));
+}
+
+// 긴 텍스트는 maxLines(기본 10줄)까지만 보여주고 '더보기'로 전체 확인
+class _ClampedText extends StatefulWidget {
+  final String text;
+  final TextStyle style;
+  final bool selectable;
+  final int maxLines;
+  const _ClampedText({required this.text, required this.style, this.selectable = false, this.maxLines = 10});
+  @override State<_ClampedText> createState() => _ClampedTextState();
+}
+class _ClampedTextState extends State<_ClampedText> {
+  bool _expanded = false;
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(builder: (ctx, cons) {
+    final tp = TextPainter(
+      text: TextSpan(text: widget.text, style: widget.style),
+      textDirection: TextDirection.ltr, maxLines: widget.maxLines)
+      ..layout(maxWidth: cons.maxWidth.isFinite ? cons.maxWidth : 10000);
+    final overflow = tp.didExceedMaxLines;
+    final collapsed = overflow && !_expanded;
+    final body = widget.selectable
+        ? SelectableText(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null)
+        : Text(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null,
+            overflow: collapsed ? TextOverflow.ellipsis : TextOverflow.clip);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      body,
+      if (overflow)
+        GestureDetector(
+          onTap: () => setState(() => _expanded = !_expanded),
+          child: Padding(padding: const EdgeInsets.only(top: 6),
+            child: Text(_expanded ? '접기' : '더보기',
+                style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)))),
+    ]);
+  });
 }
 
 class SentenceRegisterScreen extends StatefulWidget {
@@ -3761,14 +4204,14 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
                             Icon(isSelected ? Icons.check_circle_rounded : Icons.radio_button_unchecked_rounded,
                                 color: isSelected ? kBlue : Colors.grey, size: 20),
                             const SizedBox(width: 10),
-                            Expanded(child: Text(s.text, style: const TextStyle(fontSize: 14, height: 1.6))),
+                            Expanded(child: _ClampedText(text: s.text, style: const TextStyle(fontSize: 14, height: 1.6))),
                           ])));
                     }
                     return Container(margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
                           border: Border.all(color: const Color(0xFFEEF0F8))),
                       child: Row(children: [
-                        Expanded(child: SelectableText(s.text, style: const TextStyle(fontSize: 14, height: 1.6))),
+                        Expanded(child: _ClampedText(text: s.text, selectable: true, style: const TextStyle(fontSize: 14, height: 1.6))),
                         PopupMenuButton<String>(
                           icon: const Icon(Icons.more_horiz, color: Colors.grey),
                           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -3980,7 +4423,9 @@ class _RemindersScreenState extends State<RemindersScreen> {
       return;
     }
     setState(() { _selected.clear(); _selectMode = false; });
-    Navigator.push(context, MaterialPageRoute(builder: (_) => QuizScreen(presetItems: items)));
+    // 새 화면을 덮지 않고 하단 바가 있는 테스트 탭으로 전환
+    kQuizPreset.value = items;
+    kTabRequest.value = 5;
   }
 
   @override
@@ -4674,16 +5119,31 @@ class _QuizScreenState extends State<QuizScreen> {
   final _inputFocusNode = FocusNode();
   final _keyboardFocusNode = FocusNode();
 
+  List<AbbreviationModel>? _presetOverride; // 리마인드에서 넘어온 선택 약어 (한 번만 사용)
+
   @override
   void initState() {
     super.initState();
+    kQuizPreset.addListener(_onPresetRequest);
     if (widget.presetItems != null && widget.presetItems!.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _start());
     }
   }
 
+  void _onPresetRequest() {
+    final items = kQuizPreset.value;
+    if (items == null || items.isEmpty) return;
+    kQuizPreset.value = null;
+    if (!mounted) return;
+    _presetOverride = items;
+    _showTyping = false;
+    TtsController.instance.stop();
+    _start();
+  }
+
   @override
   void dispose() {
+    kQuizPreset.removeListener(_onPresetRequest);
     _answerCtrl.dispose();
     _quizCountCtrl.dispose();
     _inputFocusNode.dispose();
@@ -4711,8 +5171,10 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   List<dynamic> _buildQuestions() {
-    if (widget.presetItems != null && widget.presetItems!.isNotEmpty) {
-      final list = List<dynamic>.from(widget.presetItems!);
+    final preset = _presetOverride ?? widget.presetItems;
+    if (preset != null && preset.isNotEmpty) {
+      final list = List<dynamic>.from(preset);
+      _presetOverride = null; // 한 번 쓰고 비워서, 이후 일반 테스트에 영향이 없게 함
       list.shuffle();
       return list;
     }
