@@ -136,7 +136,6 @@ Map<String, dynamic> toMap() => {
     final l = <String>[];
     if (isConcurrent) l.add('동시');
     if (isComposite) l.add('합성');
-    if (isAttached) l.add('붙여쓰기');
     return l;
   }
 
@@ -491,35 +490,34 @@ String _dateKeyFromMs(int ms) {
   return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
 }
 
-// 00:12.3 (1시간 이상이면 01:02:03.4)
+// 00:12 (1시간 이상이면 01:02:03) — 초 미만 단위는 표시하지 않음
 String formatTypingClock(int ms) {
-  final totalTenths = ms ~/ 100;
-  final t = totalTenths % 10;
-  final sec = (totalTenths ~/ 10) % 60;
-  final min = (totalTenths ~/ 600) % 60;
-  final h = totalTenths ~/ 36000;
-  final core = '${min.toString().padLeft(2,'0')}:${sec.toString().padLeft(2,'0')}.$t';
+  final totalSec = ms ~/ 1000;
+  final sec = totalSec % 60;
+  final min = (totalSec ~/ 60) % 60;
+  final h = totalSec ~/ 3600;
+  final core = '${min.toString().padLeft(2,'0')}:${sec.toString().padLeft(2,'0')}';
   return h > 0 ? '${h.toString().padLeft(2,'0')}:$core' : core;
 }
 
-// 1시간 02분 03.456초 (밀리초까지)
+// 1시간 02분 03초 (초 미만 단위는 표시하지 않음)
 String formatTypingLong(int ms) {
   final h = ms ~/ 3600000;
   final m = (ms % 3600000) ~/ 60000;
-  final sec = ((ms % 60000) / 1000).toStringAsFixed(3);
-  if (h > 0) return '$h시간 ${m.toString().padLeft(2,'0')}분 $sec초';
+  final sec = (ms % 60000) ~/ 1000;
+  if (h > 0) return '$h시간 ${m.toString().padLeft(2,'0')}분 ${sec.toString().padLeft(2,'0')}초';
   if (m > 0) return '$m분 $sec초';
   return '$sec초';
 }
 
-// 합계용 요약: 2시간 10분 / 3분 12초 / 8.4초
+// 합계용 요약: 2시간 10분 / 3분 12초 / 8초
 String formatTypingTotal(int ms) {
   final h = ms ~/ 3600000;
   final m = (ms % 3600000) ~/ 60000;
   final s = (ms % 60000) ~/ 1000;
   if (h > 0) return '$h시간 $m분';
   if (m > 0) return '$m분 $s초';
-  return '${(ms / 1000).toStringAsFixed(1)}초';
+  return '$s초';
 }
 
 class TypingStore {
@@ -1400,7 +1398,7 @@ void _checkTodayReminders() {
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.menu_book_rounded)), label: '약어검색'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.bookmark_rounded)), label: '문장등록'),
             BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.notifications_rounded)), label: '리마인드'),
-            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '테스트'),
+            BottomNavigationBarItem(icon: Padding(padding: EdgeInsets.only(top: 4), child: Icon(Icons.quiz_rounded)), label: '공부방'),
           ]))));
   }
 }
@@ -1524,6 +1522,7 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
 
 final _analyzerCtrl     = TextEditingController();
 bool  _analyzerAnalyzed = false;
+bool  _analyzerPadOn = false; // 약어확인 화면의 연습장(좌우 분할) 켜짐 여부
 final _searchScrollCtrl = ScrollController();
 
 Widget _actionChip(IconData icon, String label, Color color) => Container(
@@ -1730,8 +1729,6 @@ class _HomeScreenState extends State<HomeScreen> {
                           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7)),
                         child: const Text('기록 추가', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
                     ]))),
-            const SizedBox(height: 10),
-            const _PracticePad(),
             const SizedBox(height: 10),
             // 오늘 테스트 정답률 카드
             Builder(builder: (_) {
@@ -1975,8 +1972,8 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
                       style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
               ...sessions.reversed.map((s) => Padding(padding: const EdgeInsets.only(bottom: 6),
                 child: Row(children: [
-                  Expanded(child: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)}  ·  ${formatTypingLong(s.activeMs)}  ·  ${s.chars}자',
-                      style: const TextStyle(fontSize: 12, color: textColor))),
+                  Expanded(child: SelectionArea(child: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)}  ·  ${formatTypingLong(s.activeMs)}  ·  ${s.chars}자',
+                      style: const TextStyle(fontSize: 12, color: textColor)))),
                   GestureDetector(onTap: () => _confirmDelete(context, s),
                     child: const Padding(padding: EdgeInsets.only(left: 8),
                       child: Icon(Icons.delete_outline_rounded, size: 16, color: Colors.grey))),
@@ -1987,19 +1984,27 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
 }
 
 // ── 연습장 (여기서 타이핑한 시간만 순공시간으로 기록) ───────────────────────────
+// 공부방 탭과 약어확인 화면(좌우 분할)에서 같은 글·같은 순공시간을 공유한다.
+// 약어 분석 글과 같은 글자 크기/줄 간격을 쓴다.
+const double kReadFontSize = 16;
+const double kReadLineHeight = 1.8;
+
+TextEditingController? _practicePadCtrl;
+TextEditingController get practicePadCtrl => _practicePadCtrl ??=
+    TextEditingController(text: (Hive.box('settings').get('practice_pad') as String?) ?? '');
+
 class _PracticePad extends StatefulWidget {
-  const _PracticePad();
+  final EdgeInsets margin;
+  const _PracticePad({this.margin = const EdgeInsets.symmetric(horizontal: 16)});
   @override State<_PracticePad> createState() => _PracticePadState();
 }
 class _PracticePadState extends State<_PracticePad> {
-  late final TextEditingController _ctrl;
+  TextEditingController get _ctrl => practicePadCtrl;
   @override
   void initState() {
     super.initState();
-    _ctrl = TextEditingController(text: (Hive.box('settings').get('practice_pad') as String?) ?? '');
     TypingTracker.instance.syncLength(_ctrl.text.length);
   }
-  @override void dispose() { _ctrl.dispose(); super.dispose(); }
 
   Future<void> _finish() async {
     final sess = await TypingTracker.instance.finish();
@@ -2010,61 +2015,75 @@ class _PracticePadState extends State<_PracticePad> {
   }
 
   @override
-  Widget build(BuildContext context) => Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
-    child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFEEF0F8))),
-      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) {
-          final tr = TypingTracker.instance;
-          final typingNow = tr.isTypingNow;
-          final status = !tr.active ? '세션 없음' : typingNow ? '● 타이핑 중' : '⏸ 대기 중';
-          return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [
-              const Icon(Icons.edit_note_rounded, color: kBlue, size: 20),
-              const SizedBox(width: 6),
-              const Text('연습장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
-              const Spacer(),
-              Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(color: typingNow ? kBlue.withOpacity(0.12) : const Color(0xFFF0F0F5),
-                    borderRadius: BorderRadius.circular(10)),
-                child: Text(status, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
-                    color: typingNow ? kBlue : Colors.grey))),
-            ]),
-            if (tr.active)
-              Padding(padding: const EdgeInsets.only(top: 6),
-                child: Text('이번 순공 ${formatTypingClock(tr.activeMs)}  ·  입력 ${tr.chars}자',
+  Widget build(BuildContext context) => GestureDetector(
+    // 바깥 화면의 탭(입력창으로 포커스 이동)이 연습장 입력을 방해하지 않게 막음
+    behavior: HitTestBehavior.opaque, onTap: () {},
+    child: Padding(padding: widget.margin,
+      child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: const Color(0xFFEEF0F8))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          AnimatedBuilder(
+            animation: Listenable.merge([TypingTracker.instance, Hive.box('typingSessions').listenable()]),
+            builder: (context, _) {
+              final tr = TypingTracker.instance;
+              final typingNow = tr.isTypingNow;
+              final status = !tr.active ? '세션 없음' : typingNow ? '● 타이핑 중' : '⏸ 대기 중';
+              // 홈의 '순공시간 (오늘)'과 같은 값: 저장된 오늘 기록 + 진행 중인 세션
+              final todayKey = _dateKeyFromMs(DateTime.now().millisecondsSinceEpoch);
+              final liveToday = tr.active && _dateKeyFromMs(tr.startMs) == todayKey;
+              final todayTotal = TypingStore.forDate(todayKey).fold<int>(0, (a, s) => a + s.activeMs)
+                  + (liveToday ? tr.activeMs : 0);
+              return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Row(children: [
+                  const Icon(Icons.edit_note_rounded, color: kBlue, size: 20),
+                  const SizedBox(width: 6),
+                  const Text('연습장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+                  const Spacer(),
+                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(color: typingNow ? kBlue.withOpacity(0.12) : const Color(0xFFF0F0F5),
+                        borderRadius: BorderRadius.circular(10)),
+                    child: Text(status, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+                        color: typingNow ? kBlue : Colors.grey))),
+                ]),
+                Padding(padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    tr.active
+                        ? '오늘 순공 ${formatTypingClock(todayTotal)}  ·  이번 ${formatTypingClock(tr.activeMs)}  ·  입력 ${tr.chars}자'
+                        : '오늘 순공 ${formatTypingClock(todayTotal)}',
                     style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
-          ]);
-        }),
-        const SizedBox(height: 8),
-        TextField(controller: _ctrl, minLines: 6, maxLines: 14,
-          onChanged: (v) {
-            TypingTracker.instance.onTextChanged(v);
-            Hive.box('settings').put('practice_pad', v);
-          },
-          decoration: InputDecoration(hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
-            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: kBlue)),
-            contentPadding: const EdgeInsets.all(12))),
-        const SizedBox(height: 6),
-        Row(children: [
-          TextButton(
-            onPressed: () {
-              setState(() => _ctrl.clear());
-              TypingTracker.instance.syncLength(0);
-              Hive.box('settings').put('practice_pad', '');
+              ]);
+            }),
+          const SizedBox(height: 8),
+          Expanded(child: TextField(controller: _ctrl, expands: true, minLines: null, maxLines: null,
+            textAlignVertical: TextAlignVertical.top,
+            style: const TextStyle(fontSize: kReadFontSize, height: kReadLineHeight, color: Colors.black87),
+            onChanged: (v) {
+              TypingTracker.instance.onTextChanged(v);
+              Hive.box('settings').put('practice_pad', v);
             },
-            child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
-          const Spacer(),
-          AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) => ElevatedButton.icon(
-            onPressed: TypingTracker.instance.active ? _finish : null,
-            icon: const Icon(Icons.stop_rounded, size: 16),
-            label: const Text('종료·저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
-        ]),
-      ])));
+            decoration: InputDecoration(hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: kBlue)),
+              contentPadding: const EdgeInsets.all(12)))),
+          const SizedBox(height: 6),
+          Row(children: [
+            TextButton(
+              onPressed: () {
+                setState(() => _ctrl.clear());
+                TypingTracker.instance.syncLength(0);
+                Hive.box('settings').put('practice_pad', '');
+              },
+              child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+            const Spacer(),
+            AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) => ElevatedButton.icon(
+              onPressed: TypingTracker.instance.active ? _finish : null,
+              icon: const Icon(Icons.stop_rounded, size: 16),
+              label: const Text('종료·저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
+          ]),
+        ]))));
 }
 
 class _TimerBtn extends StatelessWidget {
@@ -2089,7 +2108,7 @@ class _RecordCard extends StatelessWidget {
   }
   @override Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
     Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-      Text(record.date, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+      SelectionArea(child: Text(record.date, style: const TextStyle(fontSize: 12, color: Colors.grey))),
       Row(children: [
         TextButton(onPressed: onEdit, child: const Text('수정', style: TextStyle(color: kBlue, fontSize: 12))),
         TextButton(onPressed: onDelete, child: const Text('삭제', style: TextStyle(color: Colors.red, fontSize: 12))),
@@ -2118,7 +2137,7 @@ class _SI extends StatelessWidget {
   @override Widget build(BuildContext context) => Column(children: [
     Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
     const SizedBox(height: 2),
-    Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: kBlueDark)),
+    SelectionArea(child: Text(value, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: kBlueDark))),
   ]);
 }
 class _Div extends StatelessWidget {
@@ -2305,6 +2324,8 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
             boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.12), blurRadius: 12, offset: const Offset(0,3))]),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Row(children: [
+              if (abbr.isAttached) const Padding(padding: EdgeInsets.only(right: 3),
+                child: Icon(Icons.south_west_rounded, size: 13, color: kBlueDark)),
               Text(abbr.displayWord.replaceAll('*', ' '), style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
               ...abbr.typeLabels.map((l) {
                 final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
@@ -2332,6 +2353,20 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
     _tooltipOverlay?.remove(); _tooltipOverlay = null;
     if (mounted) setState(() => _selectedAbbr = null);
   }
+
+  // 연습장 켜기/끄기 버튼 (분류 안내 줄 오른쪽)
+  Widget _padToggleButton() => GestureDetector(
+    onTap: () => setState(() => _analyzerPadOn = !_analyzerPadOn),
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(color: _analyzerPadOn ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.edit_note_rounded, size: 14, color: _analyzerPadOn ? Colors.white : kBlue),
+        const SizedBox(width: 4),
+        Text(_analyzerPadOn ? '연습장 끄기' : '연습장 켜기',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+                color: _analyzerPadOn ? Colors.white : kBlue)),
+      ])));
 
   void _confirmClear(BuildContext context) {
     showDialog(context: context, builder: (ctx) => AlertDialog(
@@ -2370,29 +2405,12 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
         const int kFoundCollapsed = 6; // 3칸 x 2줄
         final visibleCount = (_foundExpanded || shown.length <= kFoundCollapsed) ? shown.length : kFoundCollapsed;
 
-        return GestureDetector(
-          onTap: () { _closeTooltip(); FocusScope.of(context).requestFocus(_focusNode); },
-          child: Scaffold(backgroundColor: Colors.white, resizeToAvoidBottomInset: true,
-            body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Padding(padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
-                child: Row(children: [
-                  const Expanded(child: Text('문장 내 약어 추출',
-                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
-                  if (_analyzerCtrl.text.isNotEmpty)
-                    GestureDetector(onTap: () => _confirmClear(context),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(20)),
-                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(Icons.clear_rounded, size: 14, color: Colors.red),
-                          SizedBox(width: 4),
-                          Text('모두 지우기', style: TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.w600)),
-                        ]))),
-                ])),
-              Expanded(child: SingleChildScrollView(
-                keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        final bool showResult = _analyzerAnalyzed && text.isNotEmpty;
+        final bool splitOn = _analyzerPadOn && showResult; // 연습장 켜짐: 좌우 분할
+
+        // 위쪽(입력/분석 버튼/분류 안내), 아래쪽(분석 글·TTS·사용된 약어)을 나눠 담아 두고,
+        // 분할 모드에서는 아래쪽만 왼쪽 칸에서 따로 스크롤되게 배치한다.
+        final headWidgets = <Widget>[
                   Focus(onKeyEvent: (node, event) {
                     if (event is KeyDownEvent &&
                         (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
@@ -2421,15 +2439,22 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                   if (_analyzerAnalyzed && text.isEmpty)
                     const Padding(padding: EdgeInsets.only(top: 16),
                         child: Center(child: Text('문장을 먼저 입력해 주세요.', style: TextStyle(color: Colors.grey)))),
-                  if (_analyzerAnalyzed && text.isNotEmpty) ...[
+        ];
+        final legendWidgets = showResult ? <Widget>[
                     const SizedBox(height: 16),
-                    Wrap(spacing: 12, runSpacing: 6, children: [
+                    Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+                      Expanded(child: Wrap(spacing: 12, runSpacing: 6, children: [
                       _Leg(color: kBlue, label: '일반 약어'),
                       _Leg(color: kBlueSky, label: '합성약어'),
                       _Leg(color: kPurple, label: '동시처리약어'),
                       const Text('⭐ 즐겨찾기', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                      ])),
+                      const SizedBox(width: 8),
+                      _padToggleButton(),
                     ]),
                     const SizedBox(height: 8),
+        ] : <Widget>[];
+        final bodyWidgets = showResult ? <Widget>[
                     Container(width: double.infinity, padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
                           borderRadius: BorderRadius.circular(12), border: Border.all(color: kBlueLight)),
@@ -2541,6 +2566,8 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                                         size: 12, color: isSelected ? kBlue : Colors.grey),
                                     const SizedBox(width: 3),
                                   ],
+                                  if (a.isAttached) const Padding(padding: EdgeInsets.only(right: 2),
+                                    child: Icon(Icons.south_west_rounded, size: 11, color: kBlueDark)),
                                   ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: cons.maxWidth * 0.6),
                                     child: Text(a.displayWord.replaceAll('*', ' '),
@@ -2585,8 +2612,53 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                             ]))),
                       const SizedBox(height: 16),
                     ],
-                  ],
-                ]))),
+        ] : <Widget>[];
+
+        return GestureDetector(
+          onTap: () { _closeTooltip(); FocusScope.of(context).requestFocus(_focusNode); },
+          child: Scaffold(backgroundColor: Colors.white, resizeToAvoidBottomInset: true,
+            body: SafeArea(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Padding(padding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+                child: Row(children: [
+                  const Expanded(child: Text('문장 내 약어 추출',
+                      style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
+                  if (_analyzerCtrl.text.isNotEmpty)
+                    GestureDetector(onTap: () => _confirmClear(context),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(20)),
+                        child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.clear_rounded, size: 14, color: Colors.red),
+                          SizedBox(width: 4),
+                          Text('모두 지우기', style: TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.w600)),
+                        ]))),
+                ])),
+              Expanded(child: splitOn
+                ? Column(children: [
+                    Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        ...headWidgets,
+                        ...legendWidgets,
+                      ])),
+                    Expanded(child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      // 왼쪽: 약어 확인 중인 글 (자체 스크롤)
+                      Expanded(child: SingleChildScrollView(
+                        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                        padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
+                        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: bodyWidgets))),
+                      Container(width: 1, color: const Color(0xFFEEF0F8)),
+                      // 오른쪽: 연습장 (자체 스크롤)
+                      const Expanded(child: _PracticePad(margin: EdgeInsets.fromLTRB(8, 0, 16, 12))),
+                    ])),
+                  ])
+                : SingleChildScrollView(
+                    keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      ...headWidgets,
+                      if (showResult) ...legendWidgets,
+                      if (showResult) ...bodyWidgets,
+                    ]))),
             ]))));
       });
   }
@@ -2640,7 +2712,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
                     : isSelected ? color.withOpacity(0.12) : null,
                 borderRadius: BorderRadius.circular(3)),
               child: Text(displayText,
-                  style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8,
+                  style: TextStyle(fontSize: kReadFontSize, color: color, fontWeight: fw, height: kReadLineHeight,
                       decoration: isSelected ? TextDecoration.underline : null,
                       decorationColor: color))))));
       } else {
@@ -2654,7 +2726,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
 
           if (isSpace) {
             children.add(TextSpan(text: piece,
-                style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)));
+                style: TextStyle(fontSize: kReadFontSize, color: color, fontWeight: fw, height: kReadLineHeight)));
           } else {
             children.add(WidgetSpan(
               alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
@@ -2665,7 +2737,7 @@ class _TtsAnalysisTextViewState extends State<TtsAnalysisTextView> {
                     color: pieceHighlighted ? kBlue.withOpacity(0.18) : null,
                     borderRadius: BorderRadius.circular(3)),
                   child: Text(piece,
-                      style: TextStyle(fontSize: 16, color: color, fontWeight: fw, height: 1.8)),
+                      style: TextStyle(fontSize: kReadFontSize, color: color, fontWeight: fw, height: kReadLineHeight)),
                 ),
               ),
             ));
@@ -3893,13 +3965,17 @@ class SoggiKeyboardWidget extends StatelessWidget {
 class _AbbrContent extends StatelessWidget {
   final AbbreviationModel abbr;
   final List<GroupModel> groups;
-  const _AbbrContent({required this.abbr, required this.groups});
+  final bool selectable; // true면 약어 글자를 드래그·복사할 수 있음 (선택 모드가 아닌 목록용)
+  const _AbbrContent({required this.abbr, required this.groups, this.selectable = false});
   @override
   Widget build(BuildContext context) {
 final abbrGroups = groups.where((g) => abbr.groupIds.contains(g.id)).toList();    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
-        if (abbr.isAttached) const Text('↙ ', style: TextStyle(fontSize: 14, color: kBlueDark, fontWeight: FontWeight.w700)),
-        Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
+        if (abbr.isAttached) const Padding(padding: EdgeInsets.only(right: 3),
+          child: Icon(Icons.south_west_rounded, size: 16, color: kBlueDark)),
+        selectable
+          ? SelectionArea(child: Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)))
+          : Text(abbr.displayWord, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 15)),
         ...abbr.typeLabels.map((label) {
           final color = label == '동시' ? kPurple : label == '합성' ? kBlueSky : kBlueDark;
           final bgColor = label == '동시' ? kPurpleLight : const Color(0xFFE0F4FF);
@@ -3933,7 +4009,7 @@ class _AbbrListTileState extends State<_AbbrListTile> {
     decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFFEEF0F8))),
     child: Row(children: [
-      Expanded(child: _AbbrContent(abbr: widget.abbr, groups: widget.groups)),
+      Expanded(child: _AbbrContent(abbr: widget.abbr, groups: widget.groups, selectable: true)),
       PopupMenuButton<String>(
         icon: const Icon(Icons.more_horiz, color: Colors.grey),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -4531,7 +4607,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
                         const SizedBox(width: 10),
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           SelectableText(r.target.replaceAll('*', ' '), style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600), maxLines: 1),
-                          Text('${r.date} · ${r.intervalDays}일 간격${r.repeat ? " · 반복" : ""}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                          SelectionArea(child: Text('${r.date} · ${r.intervalDays}일 간격${r.repeat ? " · 반복" : ""}', style: const TextStyle(fontSize: 11, color: Colors.grey))),
                         ])),
                         Switch(value: r.active, activeColor: kBlue, onChanged: (_) async { await Store.toggleReminder(r.id); }),
                         IconButton(icon: const Icon(Icons.delete_outline, color: Colors.grey, size: 20),
@@ -5095,8 +5171,9 @@ class QuizScreen extends StatefulWidget {
 }
 
 class _QuizScreenState extends State<QuizScreen> {
-  // 테스트 탭 (약어테스트 / 타이핑연습)
+  // 공부방 탭 (연습장 / 약어테스트 / 타이핑연습)
   bool _showTyping = false;
+  bool _showPad = false; // 연습장 (순공시간 측정)
 
   // 설정
   String _mode = 'abbr'; // 'abbr' or 'sentence'
@@ -5137,6 +5214,7 @@ class _QuizScreenState extends State<QuizScreen> {
     if (!mounted) return;
     _presetOverride = items;
     _showTyping = false;
+    _showPad = false;
     TtsController.instance.stop();
     _start();
   }
@@ -5409,39 +5487,40 @@ class _QuizScreenState extends State<QuizScreen> {
         valueListenable: Hive.box('sentences').listenable(),
         builder: (context, __, ___) {
           return Column(children: [
-            // 상단 탭 토글
-            if (!_started && !_showTyping || _showTyping)
+            // 상단 탭 토글 (연습장 / 약어 테스트 / 타이핑 연습)
+            if (!_started || _showTyping || _showPad)
               Container(color: Colors.white,
                 padding: const EdgeInsets.fromLTRB(16, 48, 16, 8),
                 child: Row(children: [
-                  Expanded(child: GestureDetector(
-                    onTap: () => setState(() => _showTyping = false),
-                    child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
-                      decoration: BoxDecoration(
-                        color: !_showTyping ? kBlue : kBlueLight,
-                        borderRadius: BorderRadius.circular(12)),
-                      child: Center(child: Text('약어 테스트',
-                          style: TextStyle(color: !_showTyping ? Colors.white : kBlue,
-                              fontWeight: FontWeight.w700, fontSize: 14)))))),
+                  Expanded(child: _tabBtn('연습장', _showPad,
+                      () => setState(() { _showPad = true; _showTyping = false; }))),
                   const SizedBox(width: 8),
-                  Expanded(child: GestureDetector(
-                    onTap: () => setState(() => _showTyping = true),
-                    child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
-                      decoration: BoxDecoration(
-                        color: _showTyping ? kBlue : kBlueLight,
-                        borderRadius: BorderRadius.circular(12)),
-                      child: Center(child: Text('타이핑 연습',
-                          style: TextStyle(color: _showTyping ? Colors.white : kBlue,
-                              fontWeight: FontWeight.w700, fontSize: 14)))))),
+                  Expanded(child: _tabBtn('약어 테스트', !_showPad && !_showTyping,
+                      () => setState(() { _showPad = false; _showTyping = false; }))),
+                  const SizedBox(width: 8),
+                  Expanded(child: _tabBtn('타이핑 연습', _showTyping,
+                      () => setState(() { _showPad = false; _showTyping = true; }))),
                 ])),
             // 하단 콘텐츠
-            Expanded(child: _showTyping
-              ? const TypingPracticeScreen()
-              : _started ? (_finished ? _buildResult() : _buildQuiz())
-                         : _buildSetup()),
+            Expanded(child: _showPad
+              ? const _PracticePad(margin: EdgeInsets.fromLTRB(16, 4, 16, 12))
+              : _showTyping
+                ? const TypingPracticeScreen()
+                : _started ? (_finished ? _buildResult() : _buildQuiz())
+                           : _buildSetup()),
           ]);
         }));
   }
+
+  Widget _tabBtn(String label, bool selected, VoidCallback onTap) => GestureDetector(
+    onTap: onTap,
+    child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        color: selected ? kBlue : kBlueLight,
+        borderRadius: BorderRadius.circular(12)),
+      child: Center(child: Text(label,
+          style: TextStyle(color: selected ? Colors.white : kBlue,
+              fontWeight: FontWeight.w700, fontSize: 14)))));
 
   // ── 설정 화면 ──
 Widget _buildSetup() {
@@ -5803,16 +5882,16 @@ Widget _buildQuiz() {
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   const Text('정답', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
-                  Text(r['question'] as String,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+                  SelectionArea(child: Text(r['question'] as String,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700))),
                 ])),
                 Container(width: 1, height: 32, margin: const EdgeInsets.symmetric(horizontal: 10),
                     color: const Color(0xFFFFD5D5)),
                 Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   const Text('내 답', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w600)),
                   const SizedBox(height: 2),
-                  Text(userAnswer.isEmpty ? '(입력 없음)' : userAnswer,
-                      style: const TextStyle(fontSize: 13, color: Colors.red, fontWeight: FontWeight.w700)),
+                  SelectionArea(child: Text(userAnswer.isEmpty ? '(입력 없음)' : userAnswer,
+                      style: const TextStyle(fontSize: 13, color: Colors.red, fontWeight: FontWeight.w700))),
                 ])),
               ]));
           }),
