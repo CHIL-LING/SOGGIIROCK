@@ -1569,6 +1569,11 @@ extension ListExt<T> on List<T> {
 }
 
 // 확인 다이얼로그에서 엔터(Enter)로 바로 확정할 수 있게 해주는 래퍼
+// - 포커스 위치와 상관없이 "지금 맨 위에 떠 있는 창"에서만 Enter를 받는다.
+// - 여러 줄 입력칸(메모 등)에 커서가 있으면 Enter는 줄바꿈으로 남겨 두고, Ctrl+Enter로 확정한다.
+// - 같은 Enter가 두 번 처리되지 않게 짧은 시간 안의 중복 입력은 무시한다.
+DateTime _enterConfirmLast = DateTime.fromMillisecondsSinceEpoch(0);
+
 class _EnterToConfirm extends StatefulWidget {
   final Widget child;
   final VoidCallback onConfirm;
@@ -1576,20 +1581,40 @@ class _EnterToConfirm extends StatefulWidget {
   @override State<_EnterToConfirm> createState() => _EnterToConfirmState();
 }
 class _EnterToConfirmState extends State<_EnterToConfirm> {
-  final _focusNode = FocusNode();
-  @override void dispose() { _focusNode.dispose(); super.dispose(); }
+  @override void initState() { super.initState(); HardwareKeyboard.instance.addHandler(_onKey); }
+  @override void dispose() { HardwareKeyboard.instance.removeHandler(_onKey); super.dispose(); }
+
+  bool _focusInMultiline() {
+    final fctx = FocusManager.instance.primaryFocus?.context;
+    if (fctx == null) return false;
+    final editable = fctx.findAncestorWidgetOfExactType<EditableText>();
+    if (editable == null || editable.maxLines == 1) return false;
+    // 이 창 안에 있는 여러 줄 입력칸일 때만 해당 (뒤쪽 화면의 입력칸은 무시)
+    bool inside = false;
+    final me = context as Element;
+    fctx.visitAncestorElements((e) {
+      if (identical(e, me)) { inside = true; return false; }
+      return true;
+    });
+    return inside;
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (!mounted || event is! KeyDownEvent) return false;
+    final k = event.logicalKey;
+    if (k != LogicalKeyboardKey.enter && k != LogicalKeyboardKey.numpadEnter) return false;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isCurrent) return false;
+    if (_focusInMultiline() && !HardwareKeyboard.instance.isControlPressed) return false;
+    final now = DateTime.now();
+    if (now.difference(_enterConfirmLast).inMilliseconds < 350) return true;
+    _enterConfirmLast = now;
+    widget.onConfirm();
+    return true;
+  }
+
   @override
-  Widget build(BuildContext context) => KeyboardListener(
-    focusNode: _focusNode,
-    autofocus: true,
-    onKeyEvent: (event) {
-      if (event is KeyDownEvent &&
-          (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
-        widget.onConfirm();
-      }
-    },
-    child: widget.child,
-  );
+  Widget build(BuildContext context) => widget.child;
 }
 
 class HomeScreen extends StatefulWidget {
@@ -1816,8 +1841,34 @@ class _HomeScreenState extends State<HomeScreen> {
     final charOpts = [for (int c = 110; c <= 300; c += 10) c];
     final hourOpts = [for (int h = 0; h <= 12; h++) h];
     final minOpts = [0,5,10,15,20,25,30,35,40,45,50,55];
+    bool busy = false; // Enter/버튼 중복 저장 방지
     showDialog(context: context, builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setS) => AlertDialog(
+      builder: (ctx, setS) {
+      Future<void> doSave() async {
+        if (busy) return;
+        busy = true;
+        try {
+          final rec = StudyRecordModel(date: date, studyHours: hours, studyMinutes: minutes,
+            speechChars: speech, essayChars: essay,
+            wpm: int.tryParse(wpmCtrl.text.trim()), memo: memoCtrl.text.trim());
+          if (!rec.hasData) {
+            Navigator.pop(ctx);
+            if (context.mounted) showDialog(context: context, builder: (c2) => _EnterToConfirm(
+              onConfirm: () => Navigator.pop(c2),
+              child: AlertDialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: const Text('기록 없음', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              content: const Text('하나 이상의 항목을 입력해 주세요.'),
+              actions: [ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+                onPressed: () => Navigator.pop(c2), child: const Text('확인'))])));
+            return;
+          }
+          await Store.saveRecord(rec);
+          if (ctx.mounted) Navigator.pop(ctx);
+        } finally { busy = false; }
+      }
+      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('$date 기록', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1872,25 +1923,9 @@ class _HomeScreenState extends State<HomeScreen> {
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
-            onPressed: () async {
-              final rec = StudyRecordModel(date: date, studyHours: hours, studyMinutes: minutes,
-                speechChars: speech, essayChars: essay,
-                wpm: int.tryParse(wpmCtrl.text.trim()), memo: memoCtrl.text.trim());
-              if (!rec.hasData) {
-                Navigator.pop(ctx);
-                if (context.mounted) showDialog(context: context, builder: (c2) => AlertDialog(
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                  title: const Text('기록 없음', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-                  content: const Text('하나 이상의 항목을 입력해 주세요.'),
-                  actions: [ElevatedButton(
-                    style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-                    onPressed: () => Navigator.pop(c2), child: const Text('확인'))]));
-                return;
-              }
-              await Store.saveRecord(rec);
-              if (ctx.mounted) Navigator.pop(ctx);
-            }, child: const Text('저장')),
-        ])));
+            onPressed: doSave, child: const Text('저장')),
+        ]));
+      }));
   }
 
   void _confirmDeleteRecord(BuildContext context, String date) {
@@ -1993,9 +2028,64 @@ TextEditingController? _practicePadCtrl;
 TextEditingController get practicePadCtrl => _practicePadCtrl ??=
     TextEditingController(text: (Hive.box('settings').get('practice_pad') as String?) ?? '');
 
+// 연습장 상태 표시 (연습장 글씨 · 타이핑 중/대기 · 오늘 순공 · 입력 계수)
+// 약어 확인 화면에서는 연습장 위쪽 줄(연습장 끄기 버튼 왼쪽)에, 공부방에서는 연습장 안쪽 위에 쓴다.
+class _PadStatusInfo {
+  final bool active, typingNow;
+  final String status, summary;
+  const _PadStatusInfo(this.active, this.typingNow, this.status, this.summary);
+  factory _PadStatusInfo.now() {
+    final tr = TypingTracker.instance;
+    final typingNow = tr.isTypingNow;
+    final status = !tr.active ? '세션 없음' : typingNow ? '● 타이핑 중' : '⏸ 대기 중';
+    // 홈의 '순공시간 (오늘)'과 같은 값: 저장된 오늘 기록 + 진행 중인 세션
+    final todayKey = _dateKeyFromMs(DateTime.now().millisecondsSinceEpoch);
+    final liveToday = tr.active && _dateKeyFromMs(tr.startMs) == todayKey;
+    final todayTotal = TypingStore.forDate(todayKey).fold<int>(0, (a, s) => a + s.activeMs)
+        + (liveToday ? tr.activeMs : 0);
+    final summary = tr.active
+        ? '오늘 순공 ${formatTypingClock(todayTotal)}  ·  이번 ${formatTypingClock(tr.activeMs)}  ·  입력 ${tr.chars}자'
+        : '오늘 순공 ${formatTypingClock(todayTotal)}';
+    return _PadStatusInfo(tr.active, typingNow, status, summary);
+  }
+}
+
+Widget _padStatusChip(_PadStatusInfo i) => Container(
+  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+  decoration: BoxDecoration(color: i.typingNow ? kBlue.withOpacity(0.12) : const Color(0xFFF0F0F5),
+      borderRadius: BorderRadius.circular(10)),
+  child: Text(i.status, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
+      color: i.typingNow ? kBlue : Colors.grey)));
+
+// 약어 확인 화면용: 한 줄(좁으면 줄바꿈)로 이어서 보여주는 연습장 상태
+class _PadStatusWrap extends StatelessWidget {
+  const _PadStatusWrap();
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: Listenable.merge([TypingTracker.instance, Hive.box('typingSessions').listenable()]),
+    builder: (context, _) {
+      final i = _PadStatusInfo.now();
+      return Wrap(spacing: 8, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+        const Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.edit_note_rounded, color: kBlue, size: 18),
+          SizedBox(width: 4),
+          Text('연습장', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+        ]),
+        _padStatusChip(i),
+        Text(i.summary, style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600)),
+      ]);
+    });
+}
+
 class _PracticePad extends StatefulWidget {
   final EdgeInsets margin;
-  const _PracticePad({this.margin = const EdgeInsets.symmetric(horizontal: 16)});
+  // true면 연습장 글씨·상태·입력 계수를 연습장 안쪽 위에 보여줌 (공부방).
+  // false면 약어 확인 화면처럼 바깥 윗줄에서 보여주므로 여기서는 생략.
+  final bool showHeader;
+  // true면 약어 확인 결과 글상자와 같은 모양(배경·테두리·안쪽 여백·글자 시작 위치)으로 그림.
+  final bool matchResultBox;
+  const _PracticePad({this.margin = const EdgeInsets.symmetric(horizontal: 16),
+    this.showHeader = true, this.matchResultBox = false});
   @override State<_PracticePad> createState() => _PracticePadState();
 }
 class _PracticePadState extends State<_PracticePad> {
@@ -2014,76 +2104,91 @@ class _PracticePadState extends State<_PracticePad> {
       backgroundColor: kBlue, duration: const Duration(seconds: 2)));
   }
 
+  Widget _bottomButtons() => Row(children: [
+    TextButton(
+      onPressed: () {
+        setState(() => _ctrl.clear());
+        TypingTracker.instance.syncLength(0);
+        Hive.box('settings').put('practice_pad', '');
+      },
+      child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
+    const Spacer(),
+    AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) => ElevatedButton.icon(
+      onPressed: TypingTracker.instance.active ? _finish : null,
+      icon: const Icon(Icons.stop_rounded, size: 16),
+      label: const Text('종료·저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+      style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
+  ]);
+
+  void _onChanged(String v) {
+    TypingTracker.instance.onTextChanged(v);
+    Hive.box('settings').put('practice_pad', v);
+  }
+
   @override
-  Widget build(BuildContext context) => GestureDetector(
+  Widget build(BuildContext context) {
     // 바깥 화면의 탭(입력창으로 포커스 이동)이 연습장 입력을 방해하지 않게 막음
-    behavior: HitTestBehavior.opaque, onTap: () {},
-    child: Padding(padding: widget.margin,
-      child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0xFFEEF0F8))),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          AnimatedBuilder(
-            animation: Listenable.merge([TypingTracker.instance, Hive.box('typingSessions').listenable()]),
-            builder: (context, _) {
-              final tr = TypingTracker.instance;
-              final typingNow = tr.isTypingNow;
-              final status = !tr.active ? '세션 없음' : typingNow ? '● 타이핑 중' : '⏸ 대기 중';
-              // 홈의 '순공시간 (오늘)'과 같은 값: 저장된 오늘 기록 + 진행 중인 세션
-              final todayKey = _dateKeyFromMs(DateTime.now().millisecondsSinceEpoch);
-              final liveToday = tr.active && _dateKeyFromMs(tr.startMs) == todayKey;
-              final todayTotal = TypingStore.forDate(todayKey).fold<int>(0, (a, s) => a + s.activeMs)
-                  + (liveToday ? tr.activeMs : 0);
-              return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(children: [
-                  const Icon(Icons.edit_note_rounded, color: kBlue, size: 20),
-                  const SizedBox(width: 6),
-                  const Text('연습장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
-                  const Spacer(),
-                  Container(padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(color: typingNow ? kBlue.withOpacity(0.12) : const Color(0xFFF0F0F5),
-                        borderRadius: BorderRadius.circular(10)),
-                    child: Text(status, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700,
-                        color: typingNow ? kBlue : Colors.grey))),
-                ]),
-                Padding(padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    tr.active
-                        ? '오늘 순공 ${formatTypingClock(todayTotal)}  ·  이번 ${formatTypingClock(tr.activeMs)}  ·  입력 ${tr.chars}자'
-                        : '오늘 순공 ${formatTypingClock(todayTotal)}',
-                    style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
-              ]);
-            }),
-          const SizedBox(height: 8),
-          Expanded(child: TextField(controller: _ctrl, expands: true, minLines: null, maxLines: null,
-            textAlignVertical: TextAlignVertical.top,
-            style: const TextStyle(fontSize: kReadFontSize, height: kReadLineHeight, color: Colors.black87),
-            onChanged: (v) {
-              TypingTracker.instance.onTextChanged(v);
-              Hive.box('settings').put('practice_pad', v);
-            },
-            decoration: InputDecoration(hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
-              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: kBlue)),
-              contentPadding: const EdgeInsets.all(12)))),
-          const SizedBox(height: 6),
-          Row(children: [
-            TextButton(
-              onPressed: () {
-                setState(() => _ctrl.clear());
-                TypingTracker.instance.syncLength(0);
-                Hive.box('settings').put('practice_pad', '');
-              },
-              child: const Text('지우기', style: TextStyle(color: Colors.grey, fontSize: 12))),
-            const Spacer(),
-            AnimatedBuilder(animation: TypingTracker.instance, builder: (context, _) => ElevatedButton.icon(
-              onPressed: TypingTracker.instance.active ? _finish : null,
-              icon: const Icon(Icons.stop_rounded, size: 16),
-              label: const Text('종료·저장', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
-              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))))),
-          ]),
-        ]))));
+    if (widget.matchResultBox) {
+      // 약어 확인 결과 글상자와 같은 모양 · 같은 글자 시작 위치
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque, onTap: () {},
+        child: Padding(padding: widget.margin,
+          child: Column(children: [
+            Expanded(child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
+                  borderRadius: BorderRadius.circular(12), border: Border.all(color: kBlueLight)),
+              child: TextField(controller: _ctrl, expands: true, minLines: null, maxLines: null,
+                textAlignVertical: TextAlignVertical.top,
+                style: const TextStyle(fontSize: kReadFontSize, height: kReadLineHeight, color: Colors.black87),
+                onChanged: _onChanged,
+                decoration: const InputDecoration(
+                  hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
+                  border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none,
+                  isCollapsed: true, contentPadding: EdgeInsets.zero)))),
+            const SizedBox(height: 6),
+            _bottomButtons(),
+          ])));
+    }
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque, onTap: () {},
+      child: Padding(padding: widget.margin,
+        child: Container(width: double.infinity, padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: const Color(0xFFEEF0F8))),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            if (widget.showHeader) ...[
+              AnimatedBuilder(
+                animation: Listenable.merge([TypingTracker.instance, Hive.box('typingSessions').listenable()]),
+                builder: (context, _) {
+                  final i = _PadStatusInfo.now();
+                  return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Row(children: [
+                      const Icon(Icons.edit_note_rounded, color: kBlue, size: 20),
+                      const SizedBox(width: 6),
+                      const Text('연습장', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+                      const Spacer(),
+                      _padStatusChip(i),
+                    ]),
+                    Padding(padding: const EdgeInsets.only(top: 6),
+                      child: Text(i.summary,
+                        style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
+                  ]);
+                }),
+              const SizedBox(height: 8),
+            ],
+            Expanded(child: TextField(controller: _ctrl, expands: true, minLines: null, maxLines: null,
+              textAlignVertical: TextAlignVertical.top,
+              style: const TextStyle(fontSize: kReadFontSize, height: kReadLineHeight, color: Colors.black87),
+              onChanged: _onChanged,
+              decoration: InputDecoration(hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: kBlue)),
+                contentPadding: const EdgeInsets.all(12)))),
+            const SizedBox(height: 6),
+            _bottomButtons(),
+          ]))));
+  }
 }
 
 class _TimerBtn extends StatelessWidget {
@@ -2369,20 +2474,23 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
       ])));
 
   void _confirmClear(BuildContext context) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('모두 지우기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: const Text('입력한 문장을 모두 지울까요?'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-          onPressed: () {
-            _analyzerCtrl.clear(); _analyzerAnalyzed = false;
-            TtsController.instance.stop();
-            Navigator.pop(ctx); setState(() {});
-          },
-          child: const Text('지우기')),
-      ]));
+    showDialog(context: context, builder: (ctx) {
+      void doClear() {
+        _analyzerCtrl.clear(); _analyzerAnalyzed = false;
+        TtsController.instance.stop();
+        Navigator.pop(ctx); setState(() {});
+      }
+      return _EnterToConfirm(onConfirm: doClear, child: AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('모두 지우기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+        content: const Text('입력한 문장을 모두 지울까요?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: doClear,
+            child: const Text('지우기')),
+        ]));
+    });
   }
 
   @override
@@ -2440,20 +2548,35 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                     const Padding(padding: EdgeInsets.only(top: 16),
                         child: Center(child: Text('문장을 먼저 입력해 주세요.', style: TextStyle(color: Colors.grey)))),
         ];
+        final legendWrap = Wrap(spacing: 12, runSpacing: 6, children: [
+          _Leg(color: kBlue, label: '일반 약어'),
+          _Leg(color: kBlueSky, label: '합성약어'),
+          _Leg(color: kPurple, label: '동시처리약어'),
+          const Text('⭐ 즐겨찾기', style: TextStyle(fontSize: 11, color: Colors.grey)),
+        ]);
+        // 분류 안내 줄: 연습장이 꺼져 있으면 [안내 ... 연습장 켜기]
         final legendWidgets = showResult ? <Widget>[
                     const SizedBox(height: 16),
                     Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-                      Expanded(child: Wrap(spacing: 12, runSpacing: 6, children: [
-                      _Leg(color: kBlue, label: '일반 약어'),
-                      _Leg(color: kBlueSky, label: '합성약어'),
-                      _Leg(color: kPurple, label: '동시처리약어'),
-                      const Text('⭐ 즐겨찾기', style: TextStyle(fontSize: 11, color: Colors.grey)),
-                      ])),
+                      Expanded(child: legendWrap),
                       const SizedBox(width: 8),
                       _padToggleButton(),
                     ]),
                     const SizedBox(height: 8),
         ] : <Widget>[];
+        // 연습장이 켜져 있으면 좌우 칸에 맞춰 나눠서
+        // 왼쪽: 분류 안내 / 오른쪽: [연습장 글씨 · 상태 · 입력 계수 ... 연습장 끄기]
+        // (오른쪽 줄이 연습장 입력 공간 바로 위에 오도록)
+        final splitLegendRow = Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+          Expanded(child: Padding(padding: const EdgeInsets.fromLTRB(16, 14, 8, 8), child: legendWrap)),
+          const SizedBox(width: 1),
+          Expanded(child: Padding(padding: const EdgeInsets.fromLTRB(8, 14, 16, 8),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              const Expanded(child: _PadStatusWrap()),
+              const SizedBox(width: 8),
+              _padToggleButton(),
+            ]))),
+        ]);
         final bodyWidgets = showResult ? <Widget>[
                     Container(width: double.infinity, padding: const EdgeInsets.all(14),
                       decoration: BoxDecoration(color: const Color(0xFFF8F9FF),
@@ -2638,8 +2761,8 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                     Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
                       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         ...headWidgets,
-                        ...legendWidgets,
                       ])),
+                    splitLegendRow,
                     Expanded(child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       // 왼쪽: 약어 확인 중인 글 (자체 스크롤)
                       Expanded(child: SingleChildScrollView(
@@ -2647,8 +2770,10 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                         padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: bodyWidgets))),
                       Container(width: 1, color: const Color(0xFFEEF0F8)),
-                      // 오른쪽: 연습장 (자체 스크롤)
-                      const Expanded(child: _PracticePad(margin: EdgeInsets.fromLTRB(8, 0, 16, 12))),
+                      // 오른쪽: 연습장 (왼쪽과 따로 스크롤 · 결과 글상자와 같은 크기/글자 시작 위치)
+                      const Expanded(child: _PracticePad(
+                        margin: EdgeInsets.fromLTRB(8, 0, 16, 12),
+                        showHeader: false, matchResultBox: true)),
                     ])),
                   ])
                 : SingleChildScrollView(
@@ -2826,14 +2951,18 @@ class _SearchScreenState extends State<SearchScreen> {
     }
     // 편집 중인 상태 (null=변경없음, true=추가, false=해제)
     Map<String, bool?> changes = {};
-    final focusNode = FocusNode();
+    bool asking = false; // 변경사항 확인 창이 두 번 뜨는 것 방지
 
     final apply = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(
       builder: (ctx, setS) {
         void doSave() async {
+          if (asking) return;
           final hasChange = changes.values.any((v) => v != null);
           if (!hasChange) { Navigator.pop(ctx, false); return; }
-          final ok = await showDialog<bool>(context: ctx, builder: (c2) => AlertDialog(
+          asking = true;
+          final ok = await showDialog<bool>(context: ctx, builder: (c2) => _EnterToConfirm(
+            onConfirm: () => Navigator.pop(c2, true),
+            child: AlertDialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text('변경사항 저장', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             content: const Text('그룹 설정을 변경할까요?'),
@@ -2841,15 +2970,12 @@ class _SearchScreenState extends State<SearchScreen> {
               TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                 onPressed: () => Navigator.pop(c2, true), child: const Text('저장')),
-            ]));
+            ])));
+          asking = false;
           if (ctx.mounted) Navigator.pop(ctx, ok == true);
         }
-        return KeyboardListener(
-          focusNode: focusNode,
-          autofocus: true,
-          onKeyEvent: (e) {
-            if (e is KeyDownEvent && e.logicalKey == LogicalKeyboardKey.enter) doSave();
-          },
+        return _EnterToConfirm(
+          onConfirm: doSave,
           child: AlertDialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: Text('그룹 추가/해제 (${selected.length}개 약어)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -2904,7 +3030,18 @@ class _SearchScreenState extends State<SearchScreen> {
 
   void _bulkEditType(BuildContext context, List<AbbreviationModel> all) {
     bool isComposite = false, isConcurrent = false, isAttached = false;
-    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+    bool applying = false;
+    showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+      Future<void> doApply() async {
+        if (applying) return;
+        applying = true;
+        for (final a in all.where((a) => _selected.contains(a.id)))
+          await Store.saveAbbreviation(a.copyWith(
+            isComposite: isComposite, isConcurrent: isConcurrent, isAttached: isAttached));
+        if (ctx.mounted) Navigator.pop(ctx);
+        setState(() { _selected.clear(); _selectMode = false; });
+      }
+      return _EnterToConfirm(onConfirm: doApply, child: AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: Text('분류 변경 (${_selected.length}개)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: _TypeToggleRow(
@@ -2916,14 +3053,9 @@ class _SearchScreenState extends State<SearchScreen> {
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-          onPressed: () async {
-            for (final a in all.where((a) => _selected.contains(a.id)))
-              await Store.saveAbbreviation(a.copyWith(
-                isComposite: isComposite, isConcurrent: isConcurrent, isAttached: isAttached));
-            if (ctx.mounted) Navigator.pop(ctx);
-            setState(() { _selected.clear(); _selectMode = false; });
-          }, child: const Text('적용')),
-      ])));
+          onPressed: doApply, child: const Text('적용')),
+      ]));
+    }));
   }
 
   void _openSelectedView(BuildContext context, List<AbbreviationModel> all) {
@@ -3034,13 +3166,11 @@ class _SearchScreenState extends State<SearchScreen> {
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20))),
                           child: const Text('약어 추가하기', style: TextStyle(fontWeight: FontWeight.w700))),
                       ]]))
-                  : ListView.builder(
-                      controller: _searchScrollCtrl,
-                      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      itemCount: results.length,
-                      itemBuilder: (context, index) {
-                        final a = results[index];
+                  : LayoutBuilder(builder: (context, cons) {
+                      // 화면 너비에 따라 1줄 ~ 3줄(열)로 나눠서 보여줌 (큰 화면의 빈 공간을 줄임)
+                      final int cols = cons.maxWidth < 720 ? 1 : (cons.maxWidth < 1100 ? 2 : 3);
+                      final int rowCount = (results.length + cols - 1) ~/ cols;
+                      Widget buildTile(AbbreviationModel a) {
                         final isSelected = _selected.contains(a.id);
                         if (_selectMode) {
                           return GestureDetector(
@@ -3063,7 +3193,24 @@ class _SearchScreenState extends State<SearchScreen> {
                           onEdit: () => _showAbbrEditDialog(context, existing: a),
                           onDelete: () => _confirmDelete(context, a),
                           onRemind: () => _showReminderDialog(context, a.word, 'word'));
-                      })),
+                      }
+                      return ListView.builder(
+                        controller: _searchScrollCtrl,
+                        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        itemCount: rowCount,
+                        itemBuilder: (context, r) {
+                          final start = r * cols;
+                          return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            for (int c = 0; c < cols; c++) ...[
+                              if (c > 0) const SizedBox(width: 8),
+                              Expanded(child: start + c < results.length
+                                  ? buildTile(results[start + c])
+                                  : const SizedBox.shrink()),
+                            ],
+                          ]);
+                        });
+                    })),
               ])));
           });
       });
@@ -3239,13 +3386,14 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
     wordFocusNodes.add(FocusNode());
   }
   addRow(from: existing);
+  bool saving = false; // 저장 확인 창이 두 번 뜨는 것(Enter 중복)을 막음
 
   showDialog(context: context, barrierColor: Colors.black.withOpacity(0.3),
     builder: (dCtx) => StatefulBuilder(builder: (dCtx, setS) {
       final groups = Store.getGroups();
       List<String> pf(String s) => s.split(RegExp(r'[+\s]+')).map((e) => e.trim()).where((e) => e.isNotEmpty).toList();
 
-     Future<void> saveAll() async {
+      Future<void> saveAllCore() async {
         // 중복 단어 체크
         final dupWords = <String>[];
         for (int i = 0; i < rows.length; i++) {
@@ -3259,28 +3407,30 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         }
 
         if (dupWords.isNotEmpty) {
-          final proceedAnyway = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+          final proceedAnyway = await showDialog<bool>(context: context, builder: (c) => _EnterToConfirm(
+            onConfirm: () => Navigator.pop(c, true),
+            child: AlertDialog(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text('이미 등록된 약어', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-            content: _EnterToConfirm(onConfirm: () => Navigator.pop(c, true),
-              child: Text('다음 약어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?')),
+            content: Text('다음 약어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?'),
             actions: [
               TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-                  onPressed: () => Navigator.pop(c, true), child: const Text('그래도 저장'))]));
+                  onPressed: () => Navigator.pop(c, true), child: const Text('그래도 저장'))])));
           if (proceedAnyway != true) return;
         }
 
-        final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+        final ok = await showDialog<bool>(context: context, builder: (c) => _EnterToConfirm(
+          onConfirm: () => Navigator.pop(c, true),
+          child: AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Text(existing != null ? '수정 확인' : '저장 확인',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          content: _EnterToConfirm(onConfirm: () => Navigator.pop(c, true),
-            child: Text(existing != null ? '수정할까요?' : '${rows.length}개를 저장할까요?')),
+          content: Text(existing != null ? '수정할까요?' : '${rows.length}개를 저장할까요?'),
           actions: [
             TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
             ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-                onPressed: () => Navigator.pop(c, true), child: const Text('저장'))]));
+                onPressed: () => Navigator.pop(c, true), child: const Text('저장'))])));
         if (ok != true) return;
         Navigator.pop(dCtx);
         for (int i = 0; i < rows.length; i++) {
@@ -3298,6 +3448,12 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
             isAttached: rowFlags[i]['isAttached']!,
             groupIds: rowGroupIds[i]));
         }
+      }
+
+      Future<void> saveAll() async {
+        if (saving) return;
+        saving = true;
+        try { await saveAllCore(); } finally { saving = false; }
       }
 
       void applyToAll() => setS(() {
@@ -4176,21 +4332,26 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
   void _save(BuildContext context) {
     final text = _ctrl.text.trim();
     if (text.isEmpty) return;
+    bool saving = false; // Enter/버튼 중복 저장 방지
     Future<void> doSave(BuildContext ctx) async {
+      if (saving) return;
+      saving = true;
       await Store.saveSentence(SavedSentenceModel(
         id: DateTime.now().millisecondsSinceEpoch.toString(), text: text,
         createdAt: DateTime.now().toString().substring(0, 10)));
       _ctrl.clear(); if (ctx.mounted) Navigator.pop(ctx);
     }
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => _EnterToConfirm(
+      onConfirm: () => doSave(ctx),
+      child: AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('저장 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: _EnterToConfirm(onConfirm: () => doSave(ctx), child: const Text('저장할까요?')),
+      content: const Text('저장할까요?'),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () => doSave(ctx), child: const Text('저장')),
-      ]));
+      ])));
   }
 
   @override
@@ -4794,7 +4955,7 @@ void _showBulkReminderDialog(BuildContext context, List<String> targets, String 
 }
 
 // ── 퀴즈 화면 ────────────────────────────────────────────────────────
-// ── 타이핑 연습 화면 ──────────────────────────────────────────────────────────
+// ── 스프린트(타이핑 연습) 화면 ──────────────────────────────────────────────────────────
 class TypingPracticeScreen extends StatefulWidget {
   const TypingPracticeScreen({super.key});
   @override State<TypingPracticeScreen> createState() => _TypingPracticeScreenState();
@@ -5013,7 +5174,7 @@ int _countTasu(String text) {
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           // 헤더
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            const Text('타이핑 연습', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+            const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
             if (_started)
               GestureDetector(onTap: _reset, child: _iconToolBtn(Icons.refresh_rounded)),
           ]),
@@ -5034,7 +5195,8 @@ int _countTasu(String text) {
             // 저장된 문장 선택
             if (sentences.isNotEmpty) ...[
               _lbl('저장된 문장에서 선택'),
-              SizedBox(height: 120,
+              // 약 8개 항목이 보이도록 목록을 크게 잡고, 나머지는 목록 안에서 스크롤
+              SizedBox(height: (MediaQuery.of(context).size.height - 430).clamp(400.0, 2000.0),
                 child: ListView.builder(itemCount: sentences.length,
                   itemBuilder: (_, i) {
                     final s = sentences[i];
@@ -5047,8 +5209,9 @@ int _countTasu(String text) {
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(
                             color: _textCtrl.text == s.text ? kBlue : Colors.transparent)),
-                        child: Text(s.text, style: const TextStyle(fontSize: 13),
-                            maxLines: 2, overflow: TextOverflow.ellipsis)));
+                        // 문장당 기본 최대 9줄, 10줄 이상이면 '더보기'
+                        child: _ClampedText(text: s.text, maxLines: 9,
+                            style: const TextStyle(fontSize: 13, height: 1.5))));
                   })),
               const SizedBox(height: 12),
             ],
@@ -5171,7 +5334,7 @@ class QuizScreen extends StatefulWidget {
 }
 
 class _QuizScreenState extends State<QuizScreen> {
-  // 공부방 탭 (연습장 / 약어테스트 / 타이핑연습)
+  // 공부방 탭 (연습장 / 약어테스트 / 스프린트)
   bool _showTyping = false;
   bool _showPad = false; // 연습장 (순공시간 측정)
 
@@ -5487,7 +5650,7 @@ class _QuizScreenState extends State<QuizScreen> {
         valueListenable: Hive.box('sentences').listenable(),
         builder: (context, __, ___) {
           return Column(children: [
-            // 상단 탭 토글 (연습장 / 약어 테스트 / 타이핑 연습)
+            // 상단 탭 토글 (연습장 / 약어 테스트 / 스프린트)
             if (!_started || _showTyping || _showPad)
               Container(color: Colors.white,
                 padding: const EdgeInsets.fromLTRB(16, 48, 16, 8),
@@ -5498,7 +5661,7 @@ class _QuizScreenState extends State<QuizScreen> {
                   Expanded(child: _tabBtn('약어 테스트', !_showPad && !_showTyping,
                       () => setState(() { _showPad = false; _showTyping = false; }))),
                   const SizedBox(width: 8),
-                  Expanded(child: _tabBtn('타이핑 연습', _showTyping,
+                  Expanded(child: _tabBtn('스프린트', _showTyping,
                       () => setState(() { _showPad = false; _showTyping = true; }))),
                 ])),
             // 하단 콘텐츠
