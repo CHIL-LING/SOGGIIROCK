@@ -5420,7 +5420,13 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     return Scaffold(backgroundColor: Colors.white,
       body: SafeArea(child: LayoutBuilder(builder: (context, cons) {
         if (!_started) {
-          return SingleChildScrollView(padding: const EdgeInsets.all(20), child: _buildSetup(sentences));
+          // 화면이 충분히 크면: 문장 목록이 남는 공간을 채우고 시작 버튼은 맨 아래에 고정.
+          // 아주 작으면: 목록을 작게 두고 화면 전체가 스크롤되도록.
+          final fill = cons.maxHeight >= 470;
+          if (fill) {
+            return Padding(padding: const EdgeInsets.all(20), child: _buildSetup(sentences, fill: true));
+          }
+          return SingleChildScrollView(padding: const EdgeInsets.all(20), child: _buildSetup(sentences, fill: false));
         }
         // 문장 칸 안쪽 너비 (바깥 여백 20×2, 칸 안쪽 여백 16×2)
         final innerW = cons.maxWidth - 40 - kBoxPad * 2;
@@ -5579,36 +5585,9 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
         ]),
       ])));
 
-  Widget _buildSetup(List<SavedSentenceModel> sentences) {
+  Widget _buildSetup(List<SavedSentenceModel> sentences, {required bool fill}) {
     final ready = _readyCount(sentences);
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-      const SizedBox(height: 16),
-      // 문장 직접 입력 (입력하면 맨 앞 문장으로 들어감)
-      _lbl('연습할 문장'),
-      TextField(controller: _textCtrl, maxLines: 4, onChanged: (_) => setState(() {}),
-        decoration: InputDecoration(
-          hintText: '연습할 문장을 입력하거나 아래에서 골라 주세요...',
-          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-              borderSide: const BorderSide(color: kBlue)))),
-      const SizedBox(height: 12),
-
-      // 저장된 문장에서 여러 개 선택 (누른 순서대로 연습)
-      if (sentences.isNotEmpty) ...[
-        Row(children: [
-          const Expanded(child: Text('저장된 문장에서 선택 (여러 개 가능 · 누른 순서대로)',
-              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.grey))),
-          if (_selectedIds.isNotEmpty)
-            GestureDetector(onTap: () => setState(() => _selectedIds.clear()),
-              child: const Text('선택 해제', style: TextStyle(fontSize: 12, color: Colors.grey,
-                  decoration: TextDecoration.underline))),
-        ]),
-        const SizedBox(height: 6),
-        // 약 8개 항목이 보이도록 목록을 크게 잡고, 나머지는 목록 안에서 스크롤
-        SizedBox(height: (MediaQuery.of(context).size.height - 430).clamp(400.0, 2000.0),
-          child: ListView.builder(itemCount: sentences.length,
+    final list = ListView.builder(itemCount: sentences.length,
             itemBuilder: (_, i) {
               final s = sentences[i];
               final order = _selectedIds.indexOf(s.id);
@@ -5635,18 +5614,47 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
                     Expanded(child: _ClampedText(text: s.text, maxLines: 9,
                         style: const TextStyle(fontSize: 13, height: 1.5))),
                   ])));
-            })),
-        const SizedBox(height: 12),
-      ],
-
-      SizedBox(width: double.infinity,
+            });
+    final startBtn = SizedBox(width: double.infinity,
         child: ElevatedButton.icon(
           onPressed: ready == 0 ? null : () => _begin(sentences),
           icon: const Icon(Icons.play_arrow_rounded),
           label: Text(ready > 1 ? '시작 ($ready문장)' : '시작', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
             padding: const EdgeInsets.symmetric(vertical: 14),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))))),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))));
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 16),
+      // 문장 직접 입력 (입력하면 맨 앞 문장으로 들어감)
+      _lbl('연습할 문장'),
+      TextField(controller: _textCtrl, maxLines: 4, onChanged: (_) => setState(() {}),
+        decoration: InputDecoration(
+          hintText: '연습할 문장을 입력하거나 아래에서 골라 주세요...',
+          border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+          focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: kBlue)))),
+      const SizedBox(height: 12),
+
+      // 저장된 문장에서 여러 개 선택 (누른 순서대로 연습)
+      if (sentences.isNotEmpty) ...[
+        Row(children: [
+          const Expanded(child: Text('저장된 문장에서 선택 (여러 개 가능 · 누른 순서대로)',
+              style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.grey))),
+          if (_selectedIds.isNotEmpty)
+            GestureDetector(onTap: () => setState(() => _selectedIds.clear()),
+              child: const Text('선택 해제', style: TextStyle(fontSize: 12, color: Colors.grey,
+                  decoration: TextDecoration.underline))),
+        ]),
+        const SizedBox(height: 6),
+        // 큰 화면: 남는 공간을 목록이 채우고(넘치면 목록 안에서 스크롤), 시작 버튼은 맨 아래 고정
+        // 작은 화면: 목록은 작게, 화면 전체가 스크롤
+        if (fill) Expanded(child: list) else SizedBox(height: 160, child: list),
+        const SizedBox(height: 12),
+      ] else if (fill) const Spacer(),
+
+      startBtn,
     ]);
   }
 
