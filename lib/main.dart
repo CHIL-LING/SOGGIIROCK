@@ -397,6 +397,13 @@ class Store {
   static Future<void> resetStreak(String text) async {
     await Hive.box('settings').put('_streak_${text.hashCode}', 0);
   }
+  // 약어별 마지막 테스트 시각 기록 (묵은 약어 선택용)
+  static Future<void> logQuizSeen(String text) =>
+      Hive.box('settings').put('_lastseen_${text.hashCode}', DateTime.now().millisecondsSinceEpoch);
+  static DateTime? getLastSeen(String text) {
+    final v = Hive.box('settings').get('_lastseen_${text.hashCode}');
+    return v is int ? DateTime.fromMillisecondsSinceEpoch(v) : null;
+  }
   // 오늘 테스트 정답률 기록
   static Future<void> logTodayQuizResult(int correct, int total) async {
     final box = Hive.box('settings');
@@ -5693,7 +5700,15 @@ class _QuizScreenState extends State<QuizScreen> {
   final Set<String> _filterGroupIds = {};
   int _quizCount = 10;
   final TextEditingController _quizCountCtrl = TextEditingController();
-  
+
+  // 출제 방식 (약어 테스트 전용): 'group' 그룹별 / 'review' 복습 / 'old' 묵은 약어 / 'mix' 혼합
+  String _pick = 'group';
+  int _reviewDays = 30;      // 복습 기간 (0 = 전체)
+  int _reviewMinWrong = 1;   // 기간 내 최소 오답 횟수
+  int _graduateStreak = 3;   // 연속 정답 N회면 복습에서 제외 (0 = 제외 안 함)
+  int _oldDays = 0;          // 묵은 약어 기준 일수 (0 = 오래된 순)
+  bool _includeNever = true; // 한 번도 안 본 약어 포함 여부
+
   // 퀴즈 진행
   List<dynamic> _questions = [];
   int _currentIdx = 0;
@@ -5743,8 +5758,69 @@ class _QuizScreenState extends State<QuizScreen> {
     super.dispose();
   }
 
+  String _abbrKey(AbbreviationModel a) => a.displayWord.replaceAll('*', ' ');
+
+  // 그룹 필터를 적용한 약어 목록
+  List<AbbreviationModel> _groupFiltered() {
+    final all = Store.getAbbreviations();
+    if (_filterGroupIds.isEmpty) return all;
+    return all.where((a) => a.groupIds.any((id) => _filterGroupIds.contains(id))).toList();
+  }
+
+  // 복습 후보: 기간 내 틀린 약어를 오답 많은 순(동률은 무작위)으로
+  List<AbbreviationModel> _reviewList(List<AbbreviationModel> base) {
+    final counts = Store.getRecentWrongCounts(days: _reviewDays == 0 ? 36500 : _reviewDays);
+    final rnd = math.Random();
+    final scored = <MapEntry<AbbreviationModel, double>>[];
+    for (final a in base) {
+      final key = _abbrKey(a);
+      final c = counts[key] ?? 0;
+      if (c < _reviewMinWrong) continue;
+      if (_graduateStreak > 0 && Store.getStreak(key) >= _graduateStreak) continue;
+      scored.add(MapEntry(a, c + rnd.nextDouble()));
+    }
+    scored.sort((x, y) => y.value.compareTo(x.value));
+    return scored.map((e) => e.key).toList();
+  }
+
+  // 묵은 약어 후보: 한 번도 안 본 약어(무작위) → 마지막 테스트가 오래된 순
+  List<AbbreviationModel> _oldList(List<AbbreviationModel> base) {
+    final now = DateTime.now();
+    final never = <AbbreviationModel>[];
+    final seen = <MapEntry<AbbreviationModel, DateTime>>[];
+    for (final a in base) {
+      final t = Store.getLastSeen(_abbrKey(a));
+      if (t == null) { never.add(a); continue; }
+      if (_oldDays > 0 && now.difference(t).inDays < _oldDays) continue;
+      seen.add(MapEntry(a, t));
+    }
+    seen.sort((x, y) => x.value.compareTo(y.value));
+    never.shuffle();
+    return [
+      if (_includeNever) ...never,
+      ...seen.map((e) => e.key),
+    ];
+  }
+
+  // 출제 방식별 후보를 우선순위 순으로 반환 (혼합은 복습 절반 + 묵은 약어, 부족하면 서로 채움)
+  List<AbbreviationModel> _smartPool() {
+    final base = _groupFiltered();
+    if (_pick == 'review') return _reviewList(base);
+    if (_pick == 'old') return _oldList(base);
+    final review = _reviewList(base);
+    final old = _oldList(base);
+    final picked = <AbbreviationModel>[];
+    final ids = <String>{};
+    final half = (_quizCount / 2).ceil();
+    for (final a in review.take(half)) { if (ids.add(a.id)) picked.add(a); }
+    for (final a in old) { if (ids.add(a.id)) picked.add(a); }
+    for (final a in review) { if (ids.add(a.id)) picked.add(a); }
+    return picked;
+  }
+
   // 현재 모드/그룹 기준으로 중복 없는 전체 풀 개수 반환
   int _totalPoolCount() {
+    if (_mode == 'abbr' && _pick != 'group') return _smartPool().length;
     final abbrevs = Store.getAbbreviations();
     final sentences = Store.getSentences();
     final Set<String> ids = {};
@@ -5768,6 +5844,13 @@ class _QuizScreenState extends State<QuizScreen> {
       _presetOverride = null; // 한 번 쓰고 비워서, 이후 일반 테스트에 영향이 없게 함
       list.shuffle();
       return list;
+    }
+    // 복습 / 묵은 약어 / 혼합 출제
+    if (_mode == 'abbr' && _pick != 'group') {
+      final smart = _smartPool();
+      if (smart.isEmpty) return [];
+      final n = _quizCount.clamp(1, smart.length);
+      return List<dynamic>.from(smart.take(n))..shuffle();
     }
     final abbrevs = Store.getAbbreviations();
     final sentences = Store.getSentences();
@@ -5890,6 +5973,7 @@ class _QuizScreenState extends State<QuizScreen> {
       'item': q,
     });
 
+    Store.logQuizSeen(correctText); // 마지막 테스트 시각 기록
     if (wrongWords.isNotEmpty) {
       Store.logQuizWrong(correctText);
       Store.resetStreak(correctText);
@@ -6025,6 +6109,26 @@ class _QuizScreenState extends State<QuizScreen> {
         }));
   }
 
+  // 설정 화면용 작은 선택 칩 줄
+  Widget _intChips(String label, List<MapEntry<String, int>> opts, int cur, void Function(int) onSel) =>
+    Padding(padding: const EdgeInsets.only(bottom: 14), child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start, children: [
+      _lbl(label),
+      Wrap(spacing: 8, runSpacing: 8, children: opts.map((o) {
+        final sel = o.value == cur;
+        return GestureDetector(
+          onTap: () => setState(() => onSel(o.value)),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              color: sel ? kBlue : kBlueLight,
+              borderRadius: BorderRadius.circular(20)),
+            child: Text(o.key, style: TextStyle(
+                color: sel ? Colors.white : kBlue,
+                fontWeight: FontWeight.w700, fontSize: 12))));
+      }).toList()),
+    ]));
+
   Widget _tabBtn(String label, bool selected, VoidCallback onTap) => GestureDetector(
     onTap: onTap,
     child: Container(padding: const EdgeInsets.symmetric(vertical: 10),
@@ -6156,6 +6260,36 @@ Widget _buildSetup() {
         ]),
         const SizedBox(height: 20),
 
+        // 출제 방식 (약어 테스트 전용)
+        if (_mode == 'abbr') ...[
+          _lbl('출제 방식'),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            _ModeChip(label: '그룹별', value: 'group', selected: _pick, onTap: (v) => setState(() => _pick = v)),
+            _ModeChip(label: '복습(틀린 약어)', value: 'review', selected: _pick, onTap: (v) => setState(() => _pick = v)),
+            _ModeChip(label: '묵은 약어', value: 'old', selected: _pick, onTap: (v) => setState(() => _pick = v)),
+            _ModeChip(label: '혼합', value: 'mix', selected: _pick, onTap: (v) => setState(() => _pick = v)),
+          ]),
+          const SizedBox(height: 16),
+          if (_pick == 'review' || _pick == 'mix') ...[
+            _intChips('복습 기간', const [MapEntry('최근 7일', 7), MapEntry('최근 30일', 30), MapEntry('전체', 0)],
+                _reviewDays, (v) => _reviewDays = v),
+            _intChips('최소 오답 횟수', const [MapEntry('1회 이상', 1), MapEntry('2회 이상', 2), MapEntry('3회 이상', 3)],
+                _reviewMinWrong, (v) => _reviewMinWrong = v),
+            _intChips('복습에서 제외할 기준 (연속 정답)',
+                const [MapEntry('마지막에 틀린 것만', 1), MapEntry('3번 맞히면 제외', 3), MapEntry('5번 맞히면 제외', 5), MapEntry('제외 안 함', 0)],
+                _graduateStreak, (v) => _graduateStreak = v),
+          ],
+          if (_pick == 'old' || _pick == 'mix') ...[
+            _intChips('묵은 약어 기준', const [MapEntry('오래된 순', 0), MapEntry('7일 이상', 7), MapEntry('14일 이상', 14), MapEntry('30일 이상', 30)],
+                _oldDays, (v) => _oldDays = v),
+            _intChips('한 번도 안 본 약어', const [MapEntry('포함', 1), MapEntry('제외', 0)],
+                _includeNever ? 1 : 0, (v) => _includeNever = v == 1),
+            const Padding(padding: EdgeInsets.only(bottom: 14), child: Text(
+              '※ 테스트 날짜는 이 기능을 쓰기 시작한 뒤부터 기록돼요. 기록이 없는 약어는 "한 번도 안 본" 약어로 처리해요.',
+              style: TextStyle(fontSize: 11, color: Colors.grey))),
+          ],
+        ],
+
         // 그룹 필터
         if (_mode == 'abbr' && groups.isNotEmpty) ...[
           _lbl('그룹 필터'),
@@ -6195,6 +6329,23 @@ Widget _buildSetup() {
         ],
 
 
+        if (_mode == 'abbr' && _pick != 'group') ...[
+          Builder(builder: (_) {
+            final n = _smartPool().length;
+            return Container(
+              width: double.infinity,
+              margin: const EdgeInsets.only(bottom: 14),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: n == 0 ? const Color(0xFFFFF3E0) : kBlueLight,
+                borderRadius: BorderRadius.circular(12)),
+              child: Text(
+                n == 0 ? '조건에 맞는 약어가 없어요. 옵션을 바꿔보세요.'
+                       : '조건에 맞는 약어 $n개 중 ${_quizCount.clamp(1, n)}문제 출제',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700,
+                    color: n == 0 ? const Color(0xFFE65100) : kBlueDark)));
+          }),
+        ],
         SizedBox(width: double.infinity, child: ElevatedButton(
           onPressed: _start,
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
