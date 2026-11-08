@@ -4,7 +4,6 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter/scheduler.dart';
 import 'dart:async';
-import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
@@ -51,6 +50,175 @@ String decodeWordForSearch(String word) => word.replaceAll('*', '');
 const String kFavGroupId = '__favorite__';
 final GroupModel kFavGroup = GroupModel(id: kFavGroupId, name: '⭐ 즐겨찾기', colorValue: 0xFFFFAA00, order: -1);
 
+// ═══════════════════════════════════════════════════════════════════
+// 공용 헬퍼 / 공용 위젯
+// ═══════════════════════════════════════════════════════════════════
+
+// 날짜를 'YYYY-MM-DD' 문자열로
+String _ymd(DateTime d) =>
+    '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+// TTS 속도 라벨 (단계 조절 UI와 TTS 컨트롤바가 같이 사용)
+String ttsSpeedLabel(double v) {
+  if (v <= 0.2) return '매우 느림';
+  if (v <= 0.4) return '느림';
+  if (v <= 0.6) return '보통';
+  if (v <= 0.8) return '빠름';
+  return '매우 빠름';
+}
+
+// TTS 속도 - / 라벨 / + 조절 (0.1 단위, 0.1~1.0)
+class _TtsSpeedStepper extends StatelessWidget {
+  final VoidCallback? onChanged; // 속도가 바뀐 뒤 호출 (화면 갱신 등)
+  const _TtsSpeedStepper({this.onChanged});
+
+  Future<void> _step(bool up) async {
+    final cur = TtsController.instance.speed;
+    final next = up
+        ? ((cur * 10 + 1e-6).floor() + 1) / 10
+        : ((cur * 10 - 1e-6).ceil() - 1) / 10;
+    TtsController.instance.speed = next.clamp(0.1, 1.0).toDouble();
+    await TtsController.instance.applySettings();
+    onChanged?.call();
+  }
+
+  Widget _btn(IconData icon, bool up) => GestureDetector(
+    onTap: () => _step(up),
+    child: Container(width: 36, height: 36,
+      decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+      child: Icon(icon, color: kBlue, size: 20)));
+
+  @override
+  Widget build(BuildContext context) => Row(mainAxisSize: MainAxisSize.min, children: [
+    _btn(Icons.remove_rounded, false),
+    const SizedBox(width: 8),
+    Container(
+      width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
+      child: Text(ttsSpeedLabel(TtsController.instance.speed), textAlign: TextAlign.center,
+          style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
+    const SizedBox(width: 8),
+    _btn(Icons.add_rounded, true),
+  ]);
+}
+
+// 선택 모드 공통 동작 (약어 검색 / 문장 등록 / 리마인드 화면에서 같이 사용)
+mixin _SelectionMixin<T extends StatefulWidget> on State<T> {
+  final Set<String> _selected = {};
+  bool _selectMode = false;
+
+  void _toggleSelectMode() => setState(() { _selectMode = !_selectMode; _selected.clear(); });
+  void _toggleSelect(String id) => setState(() {
+    if (_selected.contains(id)) _selected.remove(id); else _selected.add(id);
+  });
+  void _exitSelectMode() => setState(() { _selected.clear(); _selectMode = false; });
+
+  // 선택 삭제 확인 팝업 (삭제를 누르면 true)
+  Future<bool> _confirmBulkDelete(BuildContext context) async {
+    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('선택 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Text('선택한 ${_selected.length}개를 삭제할까요?'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+            onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
+    return ok == true;
+  }
+}
+
+final _analyzerCtrl     = TextEditingController();
+bool  _analyzerAnalyzed = false;
+bool  _analyzerPadOn = false; // 약어확인 화면의 연습장(좌우 분할) 켜짐 여부
+final _searchScrollCtrl = ScrollController();
+
+Widget _actionChip(IconData icon, String label, Color color) => Container(
+  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+  decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(20),
+      border: Border.all(color: color.withOpacity(0.3))),
+  child: Row(mainAxisSize: MainAxisSize.min, children: [
+    Icon(icon, size: 13, color: color),
+    const SizedBox(width: 3),
+    Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+  ]));
+
+// 헤더 상단 필터/정렬용 통일된 라벨 칩 (활성화 여부에 따라 색이 강조됨)
+Widget _toolChip(IconData icon, String label, {bool active = false, Color color = kBlue}) => Container(
+  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+  decoration: BoxDecoration(
+    color: active ? color.withOpacity(0.12) : kBlueLight,
+    borderRadius: BorderRadius.circular(20),
+    border: Border.all(color: active ? color : Colors.transparent, width: 1.2)),
+  child: Row(mainAxisSize: MainAxisSize.min, children: [
+    Icon(icon, size: 15, color: active ? color : Colors.grey.shade600),
+    const SizedBox(width: 4),
+    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: active ? color : Colors.grey.shade600)),
+  ]));
+
+// 헤더 상단 아이콘 전용 원형 버튼 (선택모드 토글, 그룹관리 이동 등 라벨 없는 내비게이션용)
+Widget _iconToolBtn(IconData icon, {Color color = kBlue}) => Container(
+  padding: const EdgeInsets.all(8),
+  decoration: const BoxDecoration(color: kBlueLight, shape: BoxShape.circle),
+  child: Icon(icon, size: 16, color: color));
+
+Widget _lbl(String text) => Padding(padding: const EdgeInsets.only(bottom: 6),
+  child: Text(text, style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)));
+
+InputDecoration _inputDeco(String? hint) => InputDecoration(
+  hintText: hint, isDense: true,
+  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: kBlue)));
+
+// 확인 다이얼로그에서 엔터(Enter)로 바로 확정할 수 있게 해주는 래퍼
+// - 포커스 위치와 상관없이 "지금 맨 위에 떠 있는 창"에서만 Enter를 받는다.
+// - 여러 줄 입력칸(메모 등)에 커서가 있으면 Enter는 줄바꿈으로 남겨 두고, Ctrl+Enter로 확정한다.
+// - 같은 Enter가 두 번 처리되지 않게 짧은 시간 안의 중복 입력은 무시한다.
+DateTime _enterConfirmLast = DateTime.fromMillisecondsSinceEpoch(0);
+
+class _EnterToConfirm extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onConfirm;
+  const _EnterToConfirm({required this.child, required this.onConfirm});
+  @override State<_EnterToConfirm> createState() => _EnterToConfirmState();
+}
+class _EnterToConfirmState extends State<_EnterToConfirm> {
+  @override void initState() { super.initState(); HardwareKeyboard.instance.addHandler(_onKey); }
+  @override void dispose() { HardwareKeyboard.instance.removeHandler(_onKey); super.dispose(); }
+
+  bool _focusInMultiline() {
+    final fctx = FocusManager.instance.primaryFocus?.context;
+    if (fctx == null) return false;
+    final editable = fctx.findAncestorWidgetOfExactType<EditableText>();
+    if (editable == null || editable.maxLines == 1) return false;
+    // 이 창 안에 있는 여러 줄 입력칸일 때만 해당 (뒤쪽 화면의 입력칸은 무시)
+    bool inside = false;
+    final me = context as Element;
+    fctx.visitAncestorElements((e) {
+      if (identical(e, me)) { inside = true; return false; }
+      return true;
+    });
+    return inside;
+  }
+
+  bool _onKey(KeyEvent event) {
+    if (!mounted || event is! KeyDownEvent) return false;
+    final k = event.logicalKey;
+    if (k != LogicalKeyboardKey.enter && k != LogicalKeyboardKey.numpadEnter) return false;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isCurrent) return false;
+    if (_focusInMultiline() && !HardwareKeyboard.instance.isControlPressed) return false;
+    final now = DateTime.now();
+    if (now.difference(_enterConfirmLast).inMilliseconds < 350) return true;
+    _enterConfirmLast = now;
+    widget.onConfirm();
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
 class GroupModel {
   final String id, name;
   final int colorValue;
@@ -79,6 +247,8 @@ class AbbreviationModel {
   // 즐겨찾기 = "__favorite__" 가상 그룹에 속해 있는지 여부 (그룹 기반)
   bool get isFavorite => groupIds.contains(kFavGroupId);
 
+  // 퀴즈에서 읽어 주고 정답으로 쓰는 문구 (* 는 띄어쓰기)
+  String get quizText => word.replaceAll('*', ' ');
   String get searchKey => decodeWordForSearch(word);
   String get displayWord => word;
 
@@ -196,6 +366,7 @@ class Store {
   static Box get _se => Hive.box('sentences');
   static Box get _rm => Hive.box('reminders');
   static Box get _gr => Hive.box('groups');
+  static Box get _qw => Hive.box('quizWrongLog');
 
   // 실제로 Hive에 저장된 그룹만 (그룹 관리 화면에서 사용, 즐겨찾기 가상그룹 제외)
   // order값이 같은 게 있으면(구버전 데이터, 전부 0 등) 원래 저장 순서를 유지하도록 안정 정렬
@@ -285,7 +456,75 @@ class Store {
   static ReminderModel? findReminder(String target) {
     try { return getReminders().firstWhere((r) => r.target == target); } catch (_) { return null; }
   }
-  static Box get _qw => Hive.box('quizWrongLog');
+
+  // ── 테스트 기록 (연속 정답 · 마지막 테스트 · TTS 오류 · 오답 로그) ─────────────
+  // 연속 정답 추적: 특정 약어를 연속으로 맞춘 횟수 저장/조회/초기화
+  static Future<void> logQuizCorrect(String text) async {
+    final box = Hive.box('settings');
+    final key = '_streak_${text.hashCode}';
+    final cur = box.get(key, defaultValue: 0) as int;
+    await box.put(key, cur + 1);
+  }
+  static int getStreak(String text) {
+    return Hive.box('settings').get('_streak_${text.hashCode}', defaultValue: 0) as int;
+  }
+  static Future<void> resetStreak(String text) async {
+    await Hive.box('settings').put('_streak_${text.hashCode}', 0);
+  }
+
+  // 약어별 마지막 테스트 시각 기록 (묵은 약어 선택용)
+  static Future<void> logQuizSeen(String text) =>
+      Hive.box('settings').put('_lastseen_${text.hashCode}', DateTime.now().millisecondsSinceEpoch);
+  static DateTime? getLastSeen(String text) {
+    final v = Hive.box('settings').get('_lastseen_${text.hashCode}');
+    return v is int ? DateTime.fromMillisecondsSinceEpoch(v) : null;
+  }
+
+  // TTS 오류(소리가 이상하게 들리는) 약어 목록: 이후 테스트에서 자동으로 텍스트를 보여줌
+  static const String _ttsErrKey = '_tts_error_list';
+  static List<String> getTtsErrors() =>
+      List<String>.from(Hive.box('settings').get(_ttsErrKey, defaultValue: <String>[]) as List);
+  static bool isTtsError(String text) => getTtsErrors().contains(text);
+  static Future<void> addTtsError(String text) async {
+    final list = getTtsErrors();
+    if (list.contains(text)) return;
+    list.add(text);
+    await Hive.box('settings').put(_ttsErrKey, list);
+  }
+  static Future<void> removeTtsError(String text) async {
+    final list = getTtsErrors()..remove(text);
+    await Hive.box('settings').put(_ttsErrKey, list);
+  }
+
+  // 오늘 테스트 정답률 기록
+  static Future<void> logTodayQuizResult(int correct, int total) async {
+    final box = Hive.box('settings');
+    final today = DateTime.now();
+    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
+    await box.put(key, {'correct': correct, 'total': total, 'ts': today.toIso8601String()});
+  }
+  static Map<String, dynamic>? getTodayQuizResult() {
+    final today = DateTime.now();
+    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
+    final v = Hive.box('settings').get(key);
+    return v != null ? Map<String, dynamic>.from(v as Map) : null;
+  }
+  // 테스트에서 틀렸을 때 항목 전체 텍스트를 기록 (역대 오답 통계용)
+  static Future<void> logQuizWrong(String text) =>
+      _qw.add({'text': text, 'ts': DateTime.now().toIso8601String()});
+  // 최근 N일간 틀린 횟수를 항목(전체 텍스트) 단위로 집계
+  static Map<String, int> getRecentWrongCounts({int days = 7}) {
+    final cutoff = DateTime.now().subtract(Duration(days: days));
+    final counts = <String, int>{};
+    for (final e in _qw.values) {
+      final m = Map.from(e as Map);
+      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+      if (ts == null || ts.isBefore(cutoff)) continue;
+      final text = m['text'] as String;
+      counts[text] = (counts[text] ?? 0) + 1;
+    }
+    return counts;
+  }
 
   // ── 취약점 분석 ──────────────────────────────────────────────────────────
   // 최근 오답에서 초/중/종성별 취약 패턴 분석
@@ -384,55 +623,6 @@ class Store {
     result.add(buf.toString());
     return result;
   }
-  // 연속 정답 추적: 특정 약어를 연속으로 맞춘 횟수 저장/조회/초기화
-  static Future<void> logQuizCorrect(String text) async {
-    final box = Hive.box('settings');
-    final key = '_streak_${text.hashCode}';
-    final cur = box.get(key, defaultValue: 0) as int;
-    await box.put(key, cur + 1);
-  }
-  static int getStreak(String text) {
-    return Hive.box('settings').get('_streak_${text.hashCode}', defaultValue: 0) as int;
-  }
-  static Future<void> resetStreak(String text) async {
-    await Hive.box('settings').put('_streak_${text.hashCode}', 0);
-  }
-  // 약어별 마지막 테스트 시각 기록 (묵은 약어 선택용)
-  static Future<void> logQuizSeen(String text) =>
-      Hive.box('settings').put('_lastseen_${text.hashCode}', DateTime.now().millisecondsSinceEpoch);
-  static DateTime? getLastSeen(String text) {
-    final v = Hive.box('settings').get('_lastseen_${text.hashCode}');
-    return v is int ? DateTime.fromMillisecondsSinceEpoch(v) : null;
-  }
-  // 오늘 테스트 정답률 기록
-  static Future<void> logTodayQuizResult(int correct, int total) async {
-    final box = Hive.box('settings');
-    final today = DateTime.now();
-    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
-    await box.put(key, {'correct': correct, 'total': total, 'ts': today.toIso8601String()});
-  }
-  static Map<String, dynamic>? getTodayQuizResult() {
-    final today = DateTime.now();
-    final key = '_quiz_result_${today.year}_${today.month}_${today.day}';
-    final v = Hive.box('settings').get(key);
-    return v != null ? Map<String, dynamic>.from(v as Map) : null;
-  }
-  // 테스트에서 틀렸을 때 항목 전체 텍스트를 기록 (역대 오답 통계용)
-  static Future<void> logQuizWrong(String text) =>
-      _qw.add({'text': text, 'ts': DateTime.now().toIso8601String()});
-  // 최근 N일간 틀린 횟수를 항목(전체 텍스트) 단위로 집계
-  static Map<String, int> getRecentWrongCounts({int days = 7}) {
-    final cutoff = DateTime.now().subtract(Duration(days: days));
-    final counts = <String, int>{};
-    for (final e in _qw.values) {
-      final m = Map.from(e as Map);
-      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
-      if (ts == null || ts.isBefore(cutoff)) continue;
-      final text = m['text'] as String;
-      counts[text] = (counts[text] ?? 0) + 1;
-    }
-    return counts;
-  }
 }
 
 class StudyTimer extends ChangeNotifier {
@@ -461,7 +651,7 @@ class StudyTimer extends ChangeNotifier {
   String get todayKey {
     final now = DateTime.now();
     final base = now.hour < 5 ? now.subtract(const Duration(days: 1)) : now;
-    return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+    return _ymd(base);
   }
   Future<void> saveToRecord() async {
     if (_seconds == 0) return;
@@ -503,7 +693,7 @@ class TypingSession {
 String _dateKeyFromMs(int ms) {
   final d = DateTime.fromMillisecondsSinceEpoch(ms);
   final base = d.hour < 5 ? d.subtract(const Duration(days: 1)) : d;
-  return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+  return _ymd(base);
 }
 
 // 00:12 (1시간 이상이면 01:02:03) — 초 미만 단위는 표시하지 않음
@@ -1039,7 +1229,7 @@ class _TtsControlBarState extends State<TtsControlBar> {
           child: Column(children: [
             _SliderRow(icon: Icons.speed_rounded, label: '속도',
               value: tts.speed, min: 0.1, max: 1.0, divisions: 9,
-              displayText: _speedLabel(tts.speed),
+              displayText: ttsSpeedLabel(tts.speed),
               onChanged: (v) async { tts.speed = v; await tts.applySettings(); setState(() {}); }),
             const SizedBox(height: 10),
             _SliderRow(icon: Icons.volume_up_rounded, label: '음량',
@@ -1110,13 +1300,6 @@ class _TtsControlBarState extends State<TtsControlBar> {
     ]);
   }
 
-  String _speedLabel(double v) {
-    if (v <= 0.2) return '매우 느림';
-    if (v <= 0.4) return '느림';
-    if (v <= 0.6) return '보통';
-    if (v <= 0.8) return '빠름';
-    return '매우 빠름';
-  }
 }
 class _SliderRow extends StatelessWidget {
   final IconData icon;
@@ -1349,7 +1532,7 @@ void _checkTodayReminders() {
         while (!next.isAfter(todayDate.subtract(const Duration(days: 1)))) {
           next = next.add(Duration(days: r.intervalDays));
         }
-        final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
+        final ds = _ymd(next);
         Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target,
             date: ds, intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
       }
@@ -1374,7 +1557,7 @@ void _checkTodayReminders() {
   String _todayStr() {
     final now = DateTime.now();
     final base = now.hour < 5 ? now.subtract(const Duration(days: 1)) : now;
-    return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+    return _ymd(base);
   }
   @override
   Widget build(BuildContext context) {
@@ -1460,7 +1643,7 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
                 onPressed: () {
                   for (final r in widget.reminders) {
                     final next = DateTime.now().add(Duration(days: r.intervalDays));
-                    final ds = '${next.year}-${next.month.toString().padLeft(2,'0')}-${next.day.toString().padLeft(2,'0')}';
+                    final ds = _ymd(next);
                     Store.saveReminder(ReminderModel(id: r.id, type: r.type, target: r.target, date: ds,
                       intervalDays: r.intervalDays, repeat: r.repeat, active: r.active));
                   }
@@ -1541,103 +1724,6 @@ class _TodayReminderDialogState extends State<_TodayReminderDialog> {
     ]));
 }
 
-final _analyzerCtrl     = TextEditingController();
-bool  _analyzerAnalyzed = false;
-bool  _analyzerPadOn = false; // 약어확인 화면의 연습장(좌우 분할) 켜짐 여부
-final _searchScrollCtrl = ScrollController();
-
-Widget _actionChip(IconData icon, String label, Color color) => Container(
-  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-  decoration: BoxDecoration(color: color.withOpacity(0.1), borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: color.withOpacity(0.3))),
-  child: Row(mainAxisSize: MainAxisSize.min, children: [
-    Icon(icon, size: 13, color: color),
-    const SizedBox(width: 3),
-    Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
-  ]));
-
-// 헤더 상단 필터/정렬용 통일된 라벨 칩 (활성화 여부에 따라 색이 강조됨)
-Widget _toolChip(IconData icon, String label, {bool active = false, Color color = kBlue}) => Container(
-  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-  decoration: BoxDecoration(
-    color: active ? color.withOpacity(0.12) : kBlueLight,
-    borderRadius: BorderRadius.circular(20),
-    border: Border.all(color: active ? color : Colors.transparent, width: 1.2)),
-  child: Row(mainAxisSize: MainAxisSize.min, children: [
-    Icon(icon, size: 15, color: active ? color : Colors.grey.shade600),
-    const SizedBox(width: 4),
-    Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: active ? color : Colors.grey.shade600)),
-  ]));
-
-// 헤더 상단 아이콘 전용 원형 버튼 (선택모드 토글, 그룹관리 이동 등 라벨 없는 내비게이션용)
-Widget _iconToolBtn(IconData icon, {Color color = kBlue}) => Container(
-  padding: const EdgeInsets.all(8),
-  decoration: const BoxDecoration(color: kBlueLight, shape: BoxShape.circle),
-  child: Icon(icon, size: 16, color: color));
-
-Widget _lbl(String text) => Padding(padding: const EdgeInsets.only(bottom: 6),
-  child: Text(text, style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)));
-
-InputDecoration _inputDeco(String? hint) => InputDecoration(
-  hintText: hint, isDense: true,
-  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: kBlue)));
-
-extension ListExt<T> on List<T> {
-  T? get firstOrNull => isEmpty ? null : first;
-  T? elementAtOrNull(int index) => (index >= 0 && index < length) ? this[index] : null;
-}
-
-// 확인 다이얼로그에서 엔터(Enter)로 바로 확정할 수 있게 해주는 래퍼
-// - 포커스 위치와 상관없이 "지금 맨 위에 떠 있는 창"에서만 Enter를 받는다.
-// - 여러 줄 입력칸(메모 등)에 커서가 있으면 Enter는 줄바꿈으로 남겨 두고, Ctrl+Enter로 확정한다.
-// - 같은 Enter가 두 번 처리되지 않게 짧은 시간 안의 중복 입력은 무시한다.
-DateTime _enterConfirmLast = DateTime.fromMillisecondsSinceEpoch(0);
-
-class _EnterToConfirm extends StatefulWidget {
-  final Widget child;
-  final VoidCallback onConfirm;
-  const _EnterToConfirm({required this.child, required this.onConfirm});
-  @override State<_EnterToConfirm> createState() => _EnterToConfirmState();
-}
-class _EnterToConfirmState extends State<_EnterToConfirm> {
-  @override void initState() { super.initState(); HardwareKeyboard.instance.addHandler(_onKey); }
-  @override void dispose() { HardwareKeyboard.instance.removeHandler(_onKey); super.dispose(); }
-
-  bool _focusInMultiline() {
-    final fctx = FocusManager.instance.primaryFocus?.context;
-    if (fctx == null) return false;
-    final editable = fctx.findAncestorWidgetOfExactType<EditableText>();
-    if (editable == null || editable.maxLines == 1) return false;
-    // 이 창 안에 있는 여러 줄 입력칸일 때만 해당 (뒤쪽 화면의 입력칸은 무시)
-    bool inside = false;
-    final me = context as Element;
-    fctx.visitAncestorElements((e) {
-      if (identical(e, me)) { inside = true; return false; }
-      return true;
-    });
-    return inside;
-  }
-
-  bool _onKey(KeyEvent event) {
-    if (!mounted || event is! KeyDownEvent) return false;
-    final k = event.logicalKey;
-    if (k != LogicalKeyboardKey.enter && k != LogicalKeyboardKey.numpadEnter) return false;
-    final route = ModalRoute.of(context);
-    if (route == null || !route.isCurrent) return false;
-    if (_focusInMultiline() && !HardwareKeyboard.instance.isControlPressed) return false;
-    final now = DateTime.now();
-    if (now.difference(_enterConfirmLast).inMilliseconds < 350) return true;
-    _enterConfirmLast = now;
-    widget.onConfirm();
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.child;
-}
-
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
   @override State<HomeScreen> createState() => _HomeScreenState();
@@ -1663,9 +1749,9 @@ class _HomeScreenState extends State<HomeScreen> {
   String _todayKey() {
     final now = DateTime.now();
     final base = now.hour < 5 ? now.subtract(const Duration(days: 1)) : now;
-    return '${base.year}-${base.month.toString().padLeft(2,'0')}-${base.day.toString().padLeft(2,'0')}';
+    return _ymd(base);
   }
-  String _fmt(DateTime d) => '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+  String _fmt(DateTime d) => _ymd(d);
 
   @override
   Widget build(BuildContext context) {
@@ -2286,7 +2372,7 @@ class _GraphScreenState extends State<GraphScreen> {
     final sessions = TypingStore.all(); final now = DateTime.now();
     double minutesWhere(bool Function(TypingSession) test) =>
         sessions.where(test).fold<int>(0, (a, s) => a + s.activeMs) / 60000.0;
-    String key(DateTime d) => '${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+    String key(DateTime d) => _ymd(d);
     if (_period == 'week') {
       final mon = now.subtract(Duration(days: now.weekday - 1)); const days = ['월','화','수','목','금','토','일'];
       return List.generate(7, (i) {
@@ -2323,7 +2409,7 @@ class _GraphScreenState extends State<GraphScreen> {
     if (_period == 'week') {
       final mon=now.subtract(Duration(days:now.weekday-1)); final days=['월','화','수','목','금','토','일'];
       return List.generate(7,(i){ final d=mon.add(Duration(days:i));
-        final k='${d.year}-${d.month.toString().padLeft(2,'0')}-${d.day.toString().padLeft(2,'0')}';
+        final k=_ymd(d);
         try{return _BD(label:days[i],value:val(recs.firstWhere((r)=>r.date==k)));}
         catch(_){return _BD(label:days[i],value:null);}});
     } else if (_period=='month') {
@@ -2423,7 +2509,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
   }
   void _bulkGridCopy(List<AbbreviationModel> found) {
     final text = found.where((a) => _gridSelected.contains(a.id))
-        .map((a) => a.displayWord.replaceAll('*', ' ')).join(', ');
+        .map((a) => a.quizText).join(', ');
     Clipboard.setData(ClipboardData(text: text));
     setState(() { _gridSelected.clear(); _gridSelectMode = false; });
   }
@@ -2441,7 +2527,8 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
     _tooltipOverlay?.remove(); _tooltipOverlay = null;
     final screenW = MediaQuery.of(context).size.width;
     final overlay = Overlay.of(context);
-final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<GroupModel>().toList();    _tooltipOverlay = OverlayEntry(builder: (_) => Stack(children: [
+    final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<GroupModel>().toList();
+    _tooltipOverlay = OverlayEntry(builder: (_) => Stack(children: [
       Positioned.fill(child: GestureDetector(onTap: _closeTooltip, behavior: HitTestBehavior.translucent,
           child: const SizedBox.expand())),
       Positioned(
@@ -2457,7 +2544,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
             Row(children: [
               if (abbr.isAttached) const Padding(padding: EdgeInsets.only(right: 3),
                 child: Icon(Icons.south_west_rounded, size: 13, color: kBlueDark)),
-              Text(abbr.displayWord.replaceAll('*', ' '), style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
+              Text(abbr.quizText, style: TextStyle(color: abbr.typeColor, fontWeight: FontWeight.w700, fontSize: 13)),
               ...abbr.typeLabels.map((l) {
                 final c = l == '동시' ? kPurple : l == '합성' ? kBlueSky : kBlueDark;
                 return Container(margin: const EdgeInsets.only(left: 3),
@@ -2532,7 +2619,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
         final plainText = parts.map((p) => p.text).join();
         final fq = _foundQuery.trim().toLowerCase();
         final shown = fq.isEmpty ? found : found.where((a) {
-          final hay = [a.displayWord.replaceAll('*', ' '), a.strokeDisplay,
+          final hay = [a.quizText, a.strokeDisplay,
             ...a.groupIds.map((id) => Store.findGroup(id)?.name ?? '')].join(' ').toLowerCase();
           return hay.contains(fq);
         }).toList();
@@ -2719,7 +2806,7 @@ final abbrGroups = abbr.groupIds.map((id) => Store.findGroup(id)).whereType<Grou
                                     child: Icon(Icons.south_west_rounded, size: 11, color: kBlueDark)),
                                   ConstrainedBox(
                                     constraints: BoxConstraints(maxWidth: cons.maxWidth * 0.6),
-                                    child: Text(a.displayWord.replaceAll('*', ' '),
+                                    child: Text(a.quizText,
                                         style: TextStyle(color: a.typeColor, fontWeight: FontWeight.w700, fontSize: 12),
                                         overflow: TextOverflow.ellipsis, maxLines: 1)),
                                   const SizedBox(width: 4),
@@ -2915,11 +3002,9 @@ class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
   @override State<SearchScreen> createState() => _SearchScreenState();
 }
-class _SearchScreenState extends State<SearchScreen> {
+class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<SearchScreen> {
   final _ctrl = TextEditingController();
   String? _filterGroupId;
-  final Set<String> _selected = {};
-  bool _selectMode = false;
   String _sortMode = Hive.box('settings').get('abbr_sort_mode', defaultValue: 'saved') as String;
 
   void _setSortMode(String mode) {
@@ -2927,36 +3012,23 @@ class _SearchScreenState extends State<SearchScreen> {
     Hive.box('settings').put('abbr_sort_mode', mode);
   }
 
-  void _toggleSelectMode() => setState(() { _selectMode = !_selectMode; _selected.clear(); });
-  void _toggleSelect(String id) => setState(() {
-    if (_selected.contains(id)) _selected.remove(id); else _selected.add(id);
-  });
-
   Future<void> _bulkFav(List<AbbreviationModel> all) async {
     for (final a in all.where((a) => _selected.contains(a.id)))
       await Store.saveAbbreviation(a.copyWith(isFavorite: true));
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   Future<void> _bulkDelete(BuildContext context, List<AbbreviationModel> all) async {
-    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('선택 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: Text('선택한 ${_selected.length}개를 삭제할까요?'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
-    if (ok != true) return;
+    if (!await _confirmBulkDelete(context)) return;
     for (final a in all.where((a) => _selected.contains(a.id)))
       await Store.deleteAbbreviation(a.id);
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkRemind(BuildContext context, List<AbbreviationModel> all) {
     final targets = all.where((a) => _selected.contains(a.id)).map((a) => a.word).toList();
     _showBulkReminderDialog(context, targets, 'word');
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkSetGroup(BuildContext context, List<AbbreviationModel> all) async {
@@ -3051,7 +3123,7 @@ class _SearchScreenState extends State<SearchScreen> {
       }
       await Store.saveAbbreviation(a.copyWith(groupIds: newIds));
     }
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkEditType(BuildContext context, List<AbbreviationModel> all) {
@@ -3065,7 +3137,7 @@ class _SearchScreenState extends State<SearchScreen> {
           await Store.saveAbbreviation(a.copyWith(
             isComposite: isComposite, isConcurrent: isConcurrent, isAttached: isAttached));
         if (ctx.mounted) Navigator.pop(ctx);
-        setState(() { _selected.clear(); _selectMode = false; });
+        _exitSelectMode();
       }
       return _EnterToConfirm(onConfirm: doApply, child: AlertDialog(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -4151,7 +4223,8 @@ class _AbbrContent extends StatelessWidget {
   const _AbbrContent({required this.abbr, required this.groups, this.selectable = false});
   @override
   Widget build(BuildContext context) {
-final abbrGroups = groups.where((g) => abbr.groupIds.contains(g.id)).toList();    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    final abbrGroups = groups.where((g) => abbr.groupIds.contains(g.id)).toList();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         if (abbr.isAttached) const Padding(padding: EdgeInsets.only(right: 3),
           child: Icon(Icons.south_west_rounded, size: 16, color: kBlueDark)),
@@ -4289,49 +4362,34 @@ class SentenceRegisterScreen extends StatefulWidget {
   const SentenceRegisterScreen({super.key});
   @override State<SentenceRegisterScreen> createState() => _SentenceRegisterScreenState();
 }
-class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
+class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _SelectionMixin<SentenceRegisterScreen> {
   final _ctrl = TextEditingController(); final _focusNode = FocusNode();
-  final Set<String> _selected = {};
-  bool _selectMode = false;
   @override void dispose() { _ctrl.dispose(); _focusNode.dispose(); super.dispose(); }
 
-  void _toggleSelectMode() => setState(() { _selectMode = !_selectMode; _selected.clear(); });
-  void _toggleSelect(String id) => setState(() {
-    if (_selected.contains(id)) _selected.remove(id); else _selected.add(id);
-  });
-
   Future<void> _bulkDelete(BuildContext context, List<SavedSentenceModel> all) async {
-    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('선택 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: Text('선택한 ${_selected.length}개를 삭제할까요?'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
-    if (ok != true) return;
+    if (!await _confirmBulkDelete(context)) return;
     for (final s in all.where((s) => _selected.contains(s.id)))
       await Store.deleteSentence(s.id);
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkRemind(BuildContext context, List<SavedSentenceModel> all) {
     final targets = all.where((s) => _selected.contains(s.id)).map((s) => s.text).toList();
     _showBulkReminderDialog(context, targets, 'sentence');
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkCopy(List<SavedSentenceModel> all) {
     final text = all.where((s) => _selected.contains(s.id)).map((s) => s.text).join('\n');
     Clipboard.setData(ClipboardData(text: text));
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _bulkCopyForAI(List<SavedSentenceModel> all) {
     final sentences = all.where((s) => _selected.contains(s.id)).map((s) => s.text).join('\n');
     final prompt = '다음 문장들과 비슷한 스타일로 자연스러운 한국어 문장을 만들어줘:\n$sentences';
     Clipboard.setData(ClipboardData(text: prompt));
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _editSelected(BuildContext context, List<SavedSentenceModel> all) {
@@ -4350,7 +4408,7 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> {
             if (text.isEmpty) return;
             await Store.saveSentence(SavedSentenceModel(id: s.id, text: text, createdAt: s.createdAt));
             if (ctx.mounted) Navigator.pop(ctx);
-            setState(() { _selected.clear(); _selectMode = false; });
+            _exitSelectMode();
           }, child: const Text('저장')),
       ]));
   }
@@ -4524,29 +4582,14 @@ class RemindersScreen extends StatefulWidget {
   const RemindersScreen({super.key});
   @override State<RemindersScreen> createState() => _RemindersScreenState();
 }
-class _RemindersScreenState extends State<RemindersScreen> {
+class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<RemindersScreen> {
   String _tl(String t) => t == 'word' ? '약어' : t == 'favorite' ? '즐겨찾기' : '문장';
-  final Set<String> _selected = {};
-  bool _selectMode = false;
-
-  void _toggleSelectMode() => setState(() { _selectMode = !_selectMode; _selected.clear(); });
-  void _toggleSelect(String id) => setState(() {
-    if (_selected.contains(id)) _selected.remove(id); else _selected.add(id);
-  });
 
   Future<void> _bulkDelete(BuildContext context, List<ReminderModel> all) async {
-    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      title: const Text('선택 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-      content: Text('선택한 ${_selected.length}개를 삭제할까요?'),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-        ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
-            onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
-    if (ok != true) return;
+    if (!await _confirmBulkDelete(context)) return;
     for (final r in all.where((r) => _selected.contains(r.id)))
       await Store.deleteReminder(r.id);
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
   }
 
   void _editSelected(BuildContext context, List<ReminderModel> all) {
@@ -4561,7 +4604,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
 
     showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
       Future<void> doSave() async {
-        final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+        final ds = _ymd(date);
         if (single) {
           final target = targetCtrl.text.trim();
           if (target.isEmpty) return;
@@ -4577,7 +4620,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
           }
         }
         if (ctx.mounted) Navigator.pop(ctx);
-        setState(() { _selected.clear(); _selectMode = false; });
+        _exitSelectMode();
       }
       return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -4603,7 +4646,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
               child: Row(children: [
                 const Icon(Icons.calendar_today_rounded, size: 16, color: kBlue),
                 const SizedBox(width: 8),
-                Text('${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}',
+                Text(_ymd(date),
                     style: const TextStyle(fontSize: 14)),
               ]))),
           const SizedBox(height: 12),
@@ -4663,7 +4706,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
       }
     }
     if (context.mounted) {
-      setState(() { _selected.clear(); _selectMode = false; });
+      _exitSelectMode();
     }
   }
 
@@ -4685,7 +4728,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
         const SnackBar(content: Text('해당 약어를 찾을 수 없어요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
       return;
     }
-    setState(() { _selected.clear(); _selectMode = false; });
+    _exitSelectMode();
     // 새 화면을 덮지 않고 하단 바가 있는 테스트 탭으로 전환
     kQuizPreset.value = items;
     kTabRequest.value = 5;
@@ -4897,7 +4940,7 @@ class _RemindersScreenState extends State<RemindersScreen> {
                 if (ok != true) return;
               }
               final date = DateTime.now().add(Duration(days: interval));
-              final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+              final ds = _ymd(date);
               for (int i = 0; i < targets.length; i++) {
                 await Store.saveReminder(ReminderModel(
                   id: '${DateTime.now().millisecondsSinceEpoch}_$i',
@@ -4932,13 +4975,20 @@ class _IntervalRepeatPicker extends StatelessWidget {
   ]);
 }
 
-void _showReminderDialog(BuildContext context, String target, String type) {
-  final existing = Store.findReminder(target);
+void _showReminderDialog(BuildContext context, String target, String type) =>
+    _reminderDialog(context, [target], type);
+
+void _showBulkReminderDialog(BuildContext context, List<String> targets, String type) =>
+    _reminderDialog(context, targets, type, bulk: true);
+
+// 리마인드 설정 팝업: 단일 항목(기존 설정 수정 포함) / 여러 항목 한 번에
+void _reminderDialog(BuildContext context, List<String> targets, String type, {bool bulk = false}) {
+  final existing = bulk ? null : Store.findReminder(targets.first);
   int interval = existing?.intervalDays ?? 1;
   bool repeat = existing?.repeat ?? false;
   showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    title: Text(existing != null ? '리마인드 수정' : '리마인드 설정',
+    title: Text(bulk ? '리마인드 설정 (${targets.length}개)' : (existing != null ? '리마인드 수정' : '리마인드 설정'),
         style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
     content: _IntervalRepeatPicker(interval: interval, repeat: repeat,
       onIntervalChanged: (v) => setS(() => interval = v),
@@ -4947,40 +4997,19 @@ void _showReminderDialog(BuildContext context, String target, String type) {
       TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
       ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
         onPressed: () async {
-          final date = DateTime.now().add(Duration(days: interval));
-          final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-          await Store.saveReminder(ReminderModel(
-            id: existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString(),
-            type: type, target: target, date: ds, intervalDays: interval, repeat: repeat));
-          if (ctx.mounted) Navigator.pop(ctx);
-        }, child: const Text('저장')),
-    ])));
-}
-
-void _showBulkReminderDialog(BuildContext context, List<String> targets, String type) {
-  int interval = 1; bool repeat = false;
-  showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
-    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-    title: Text('리마인드 설정 (${targets.length}개)', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
-    content: _IntervalRepeatPicker(interval: interval, repeat: repeat,
-      onIntervalChanged: (v) => setS(() => interval = v),
-      onRepeatChanged: (v) => setS(() => repeat = v)),
-    actions: [
-      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
-      ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
-        onPressed: () async {
-          final date = DateTime.now().add(Duration(days: interval));
-          final ds = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
-          for (final t in targets)
+          final ds = _ymd(DateTime.now().add(Duration(days: interval)));
+          for (final t in targets) {
             await Store.saveReminder(ReminderModel(
-              id: '${DateTime.now().millisecondsSinceEpoch}_${t.hashCode}',
+              id: bulk
+                  ? '${DateTime.now().millisecondsSinceEpoch}_${t.hashCode}'
+                  : (existing?.id ?? DateTime.now().millisecondsSinceEpoch.toString()),
               type: type, target: t, date: ds, intervalDays: interval, repeat: repeat));
+          }
           if (ctx.mounted) Navigator.pop(ctx);
-        }, child: const Text('설정')),
+        }, child: Text(bulk ? '설정' : '저장')),
     ])));
 }
 
-// ── 퀴즈 화면 ────────────────────────────────────────────────────────
 // ── 스프린트(타이핑 연습) 화면 ──────────────────────────────────────────────────────────
 // 타율(정확도)과 속도를 연습하는 곳.
 // - 저장된 문장을 여러 개 골라 순서대로 연습 (Enter: 다음 문장 / 마지막 문장에서 Enter: 결과)
@@ -5684,6 +5713,7 @@ bool _isWs(String ch) => ch.trim().isEmpty;
 final RegExp _wsRe = RegExp(r'\s');
 String _stripWs(String s) => s.replaceAll(_wsRe, '');
 
+// ── 퀴즈 화면 ────────────────────────────────────────────────────────
 class QuizScreen extends StatefulWidget {
   final List<AbbreviationModel>? presetItems;
   const QuizScreen({super.key, this.presetItems});
@@ -5726,6 +5756,10 @@ class _QuizScreenState extends State<QuizScreen> {
 
   List<AbbreviationModel>? _presetOverride; // 리마인드에서 넘어온 선택 약어 (한 번만 사용)
 
+  // TTS 오류: 이번 테스트에서 표시한 문제들 / 마지막 '보면서 테스트' 라운드 여부
+  List<dynamic> _ttsFlagged = [];
+  bool _seeRound = false;
+
   @override
   void initState() {
     super.initState();
@@ -5758,8 +5792,6 @@ class _QuizScreenState extends State<QuizScreen> {
     super.dispose();
   }
 
-  String _abbrKey(AbbreviationModel a) => a.displayWord.replaceAll('*', ' ');
-
   // 그룹 필터를 적용한 약어 목록
   List<AbbreviationModel> _groupFiltered() {
     final all = Store.getAbbreviations();
@@ -5773,7 +5805,7 @@ class _QuizScreenState extends State<QuizScreen> {
     final rnd = math.Random();
     final scored = <MapEntry<AbbreviationModel, double>>[];
     for (final a in base) {
-      final key = _abbrKey(a);
+      final key = a.quizText;
       final c = counts[key] ?? 0;
       if (c < _reviewMinWrong) continue;
       if (_graduateStreak > 0 && Store.getStreak(key) >= _graduateStreak) continue;
@@ -5789,7 +5821,7 @@ class _QuizScreenState extends State<QuizScreen> {
     final never = <AbbreviationModel>[];
     final seen = <MapEntry<AbbreviationModel, DateTime>>[];
     for (final a in base) {
-      final t = Store.getLastSeen(_abbrKey(a));
+      final t = Store.getLastSeen(a.quizText);
       if (t == null) { never.add(a); continue; }
       if (_oldDays > 0 && now.difference(t).inDays < _oldDays) continue;
       seen.add(MapEntry(a, t));
@@ -5821,15 +5853,10 @@ class _QuizScreenState extends State<QuizScreen> {
   // 현재 모드/그룹 기준으로 중복 없는 전체 풀 개수 반환
   int _totalPoolCount() {
     if (_mode == 'abbr' && _pick != 'group') return _smartPool().length;
-    final abbrevs = Store.getAbbreviations();
     final sentences = Store.getSentences();
     final Set<String> ids = {};
     if (_mode == 'abbr' || _mode == 'both') {
-      var filtered = abbrevs;
-      if (_filterGroupIds.isNotEmpty) {
-        filtered = abbrevs.where((a) => a.groupIds.any((id) => _filterGroupIds.contains(id))).toList();
-      }
-      for (final a in filtered) ids.add(a.id);
+      for (final a in _groupFiltered()) ids.add(a.id);
     }
     if (_mode == 'sentence' || _mode == 'both') {
       for (final s in sentences) ids.add(s.id);
@@ -5852,15 +5879,10 @@ class _QuizScreenState extends State<QuizScreen> {
       final n = _quizCount.clamp(1, smart.length);
       return List<dynamic>.from(smart.take(n))..shuffle();
     }
-    final abbrevs = Store.getAbbreviations();
     final sentences = Store.getSentences();
     List<dynamic> pool = [];
     if (_mode == 'abbr' || _mode == 'both') {
-      var filtered = abbrevs;
-      if (_filterGroupIds.isNotEmpty) {
-        filtered = abbrevs.where((a) => a.groupIds.any((id) => _filterGroupIds.contains(id))).toList();
-      }
-      pool.addAll(filtered);
+      pool.addAll(_groupFiltered());
     }
     if (_mode == 'sentence' || _mode == 'both') {
       pool.addAll(sentences);
@@ -5871,9 +5893,7 @@ class _QuizScreenState extends State<QuizScreen> {
     if (wrongCounts.isNotEmpty) {
       final extras = <dynamic>[];
       for (final item in pool) {
-        final text = item is AbbreviationModel
-            ? item.displayWord.replaceAll('*', ' ')
-            : (item as SavedSentenceModel).text;
+        final text = _itemText(item);
         final cnt = wrongCounts[text] ?? 0;
         if (cnt >= 3) extras.add(item);       // 3번 이상 틀림 → 1개 추가
         if (cnt >= 6) extras.add(item);       // 6번 이상 틀림 → 1개 더 추가
@@ -5897,6 +5917,8 @@ class _QuizScreenState extends State<QuizScreen> {
       _questions = qs;
       _currentIdx = 0;
       _results = [];
+      _ttsFlagged = [];
+      _seeRound = false;
       _started = true;
       _finished = false;
       _ttsPlayed = false;
@@ -5908,9 +5930,7 @@ class _QuizScreenState extends State<QuizScreen> {
   void _playCurrentTts() async {
     if (_currentIdx >= _questions.length) return;
     final q = _questions[_currentIdx];
-    final text = q is AbbreviationModel
-        ? q.displayWord.replaceAll('*', ' ')
-        : (q as SavedSentenceModel).text;
+    final text = _itemText(q);
     await TtsController.instance.speak(text);
     setState(() => _ttsPlayed = true);
   }
@@ -5956,9 +5976,7 @@ class _QuizScreenState extends State<QuizScreen> {
   void _submit() {
     if (_currentIdx >= _questions.length) return;
     final q = _questions[_currentIdx];
-    final correctText = q is AbbreviationModel
-        ? q.displayWord.replaceAll('*', ' ')
-        : (q as SavedSentenceModel).text;
+    final correctText = _itemText(q);
     final userText = _answerCtrl.text.trim();
 
     final correctWords = correctText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
@@ -5981,23 +5999,59 @@ class _QuizScreenState extends State<QuizScreen> {
       Store.logQuizCorrect(correctText);
     }
 
+    _goNext();
+  }
+
+  String _itemText(dynamic q) => q is AbbreviationModel
+      ? q.quizText
+      : (q as SavedSentenceModel).text;
+
+  // TTS 오류: 이 문제를 목록에 저장하고 채점·오답 기록 없이 다음 문제로
+  void _ttsErrorSkip() {
+    if (_seeRound || _currentIdx >= _questions.length) return;
+    final q = _questions[_currentIdx];
+    Store.addTtsError(_itemText(q));
+    if (!_ttsFlagged.contains(q)) _ttsFlagged.add(q);
+    TtsController.instance.stop();
+    _goNext();
+  }
+
+  // 현재 문제 소리 재생 + 입력창 포커스
+  void _presentQuestion() {
+    _playCurrentTts();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _inputFocusNode.requestFocus();
+    });
+  }
+
+  // 다음 문제로 / 마지막이면 TTS 오류 약어 보면서 테스트 → 결과
+  void _goNext() {
     if (_currentIdx < _questions.length - 1) {
       setState(() {
         _currentIdx++;
         _ttsPlayed = false;
         _answerCtrl.clear();
       });
-      _playCurrentTts();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _inputFocusNode.requestFocus();
-      });
-    } else {
-      TtsController.instance.stop();
-      // 테스트 완료 시 오늘 결과 기록
-      final correct = _results.where((r) => r['correct'] as bool).length;
-      Store.logTodayQuizResult(correct + (wrongWords.isEmpty ? 1 : 0), _questions.length);
-      setState(() => _finished = true);
+      _presentQuestion();
+      return;
     }
+    if (!_seeRound && _ttsFlagged.isNotEmpty) {
+      final items = List<dynamic>.from(_ttsFlagged)..shuffle();
+      setState(() {
+        _seeRound = true;
+        _questions = items;
+        _currentIdx = 0;
+        _ttsPlayed = false;
+        _answerCtrl.clear();
+      });
+      _presentQuestion();
+      return;
+    }
+    TtsController.instance.stop();
+    // 테스트 완료 시 오늘 결과 기록 (TTS 오류로 건너뛴 문제는 보면서 테스트에서 채점됨)
+    final correct = _results.where((r) => r['correct'] as bool).length;
+    if (_results.isNotEmpty) Store.logTodayQuizResult(correct, _results.length);
+    setState(() => _finished = true);
   }
 
   void _retryWrong() {
@@ -6005,6 +6059,8 @@ class _QuizScreenState extends State<QuizScreen> {
     if (wrongItems.isEmpty) return;
     setState(() {
       _questions = wrongItems..shuffle();
+      _ttsFlagged = [];
+      _seeRound = false;
       _currentIdx = 0;
       _results = [];
       _finished = false;
@@ -6068,7 +6124,7 @@ class _QuizScreenState extends State<QuizScreen> {
   void _copyForAI(List<dynamic> wrongItems) {
     final words = wrongItems
         .whereType<AbbreviationModel>()
-        .map((a) => a.displayWord.replaceAll('*', ' '))
+        .map((a) => a.quizText)
         .join(', ');
     final prompt = '다음 약어들을 포함한 자연스러운 한국어 문장을 공백 제외 30자 내외로 각 단어마다 5개씩 만들어줘: $words';
     Clipboard.setData(ClipboardData(text: prompt));
@@ -6107,6 +6163,48 @@ class _QuizScreenState extends State<QuizScreen> {
                            : _buildSetup()),
           ]);
         }));
+  }
+
+  // TTS 오류 약어 목록 (여기서 직접 해제)
+  void _showTtsErrorList() {
+    showModalBottomSheet(
+      context: context, isScrollControlled: true, backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+        final list = Store.getTtsErrors();
+        return SafeArea(child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+          child: Padding(padding: const EdgeInsets.all(20), child: Column(
+            mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('TTS 오류 약어 (${list.length}개)',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 4),
+            const Text('해제하면 다음 테스트부터 텍스트 없이 소리로만 출제돼요.',
+                style: TextStyle(fontSize: 11, color: Colors.grey)),
+            const SizedBox(height: 12),
+            if (list.isEmpty)
+              const Padding(padding: EdgeInsets.symmetric(vertical: 24),
+                child: Center(child: Text('표시한 약어가 없어요.', style: TextStyle(color: Colors.grey))))
+            else
+              Flexible(child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: list.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) => Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
+                  child: Row(children: [
+                    Expanded(child: SelectionArea(child: Text(list[i],
+                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)))),
+                    TextButton(
+                      onPressed: () async {
+                        await Store.removeTtsError(list[i]);
+                        setS(() {});
+                        if (mounted) setState(() {});
+                      },
+                      child: const Text('해제', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w700))),
+                  ])))),
+          ]))));
+      }));
   }
 
   // 설정 화면용 작은 선택 칩 줄
@@ -6202,50 +6300,7 @@ Widget _buildSetup() {
           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _lbl('TTS 속도'),
             const SizedBox(height: 8),
-            Row(mainAxisSize: MainAxisSize.min, children: [
-              GestureDetector(
-                onTap: () async {
-                  final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-                  final cur = TtsController.instance.speed;
-                  final idx = speeds.indexWhere((s) => s >= cur);
-                  if (idx > 0) {
-                    TtsController.instance.speed = speeds[idx - 1];
-                    await TtsController.instance.applySettings();
-                    setState(() {});
-                  }
-                },
-                child: Container(width: 36, height: 36,
-                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                  child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
-              const SizedBox(width: 8),
-              Container(
-                width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
-                decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                child: Text(() {
-                  final v = TtsController.instance.speed;
-                  if (v <= 0.2) return '매우 느림';
-                  if (v <= 0.4) return '느림';
-                  if (v <= 0.6) return '보통';
-                  if (v <= 0.8) return '빠름';
-                  return '매우 빠름';
-                }(), textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () async {
-                  final speeds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0];
-                  final cur = TtsController.instance.speed;
-                  final idx = speeds.lastIndexWhere((s) => s <= cur);
-                  if (idx < speeds.length - 1) {
-                    TtsController.instance.speed = speeds[idx + 1];
-                    await TtsController.instance.applySettings();
-                    setState(() {});
-                  }
-                },
-                child: Container(width: 36, height: 36,
-                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                  child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
-            ]),
+            _TtsSpeedStepper(onChanged: () => setState(() {})),
           ]),
         ]),
         const SizedBox(height: 32),
@@ -6352,6 +6407,13 @@ Widget _buildSetup() {
             padding: const EdgeInsets.symmetric(vertical: 16),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14))),
           child: const Text('테스트 시작', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)))),
+        const SizedBox(height: 8),
+        Center(child: TextButton.icon(
+          onPressed: _showTtsErrorList,
+          icon: const Icon(Icons.error_outline_rounded, size: 16),
+          label: Text('TTS 오류 약어 관리 (${Store.getTtsErrors().length}개)',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+          style: TextButton.styleFrom(foregroundColor: const Color(0xFFE65100)))),
       ]))));
   }
 
@@ -6359,6 +6421,8 @@ Widget _buildSetup() {
 Widget _buildQuiz() {
     final tts = TtsController.instance;
     final progress = (_currentIdx + 1) / _questions.length;
+    final curText = _itemText(_questions[_currentIdx]);
+    final showText = _seeRound || Store.isTtsError(curText); // 정답 텍스트를 보여줄지
     return Scaffold(backgroundColor: Colors.white,
       body: SafeArea(child: KeyboardListener(
         focusNode: _keyboardFocusNode,
@@ -6401,48 +6465,41 @@ Widget _buildQuiz() {
               Center(child: Text(
                 tts.playing ? '읽는 중... (Shift로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Shift)' : '눌러서 듣기'),
                 style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
+              if (!_seeRound && !showText) ...[
+                const SizedBox(height: 8),
+                Center(child: TextButton.icon(
+                  onPressed: _ttsErrorSkip,
+                  icon: const Icon(Icons.error_outline_rounded, size: 16),
+                  label: const Text('TTS 오류 (다음 문제로)', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+                  style: TextButton.styleFrom(foregroundColor: const Color(0xFFE65100)))),
+              ],
               const SizedBox(height: 16),
               // 속도 조절
               Row(children: [
-                GestureDetector(
-                  onTap: () async {
-                    TtsController.instance.speed = (TtsController.instance.speed - 0.1).clamp(0.1, 1.0);
-                    await TtsController.instance.applySettings();
-                    setState(() {});
-                    _inputFocusNode.requestFocus();
-                  },
-                  child: Container(width: 36, height: 36,
-                    decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                    child: const Icon(Icons.remove_rounded, color: kBlue, size: 20))),
-                const SizedBox(width: 8),
-                Container(
-                  width: 70, padding: const EdgeInsets.symmetric(vertical: 8),
-                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                  child: Text(() {
-                    final v = TtsController.instance.speed;
-                    if (v <= 0.2) return '매우 느림';
-                    if (v <= 0.4) return '느림';
-                    if (v <= 0.6) return '보통';
-                    if (v <= 0.8) return '빠름';
-                    return '매우 빠름';
-                  }(), textAlign: TextAlign.center,
-                      style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
-                const SizedBox(width: 8),
-                GestureDetector(
-                  onTap: () async {
-                    TtsController.instance.speed = (TtsController.instance.speed + 0.1).clamp(0.1, 1.0);
-                    await TtsController.instance.applySettings();
-                    setState(() {});
-                    _inputFocusNode.requestFocus();
-                  },
-                  child: Container(width: 36, height: 36,
-                    decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(8)),
-                    child: const Icon(Icons.add_rounded, color: kBlue, size: 20))),
+                _TtsSpeedStepper(onChanged: () {
+                  setState(() {});
+                  _inputFocusNode.requestFocus();
+                }),
                 const SizedBox(width: 8),
                 const Text('속도', style: TextStyle(fontSize: 12, color: Colors.grey)),
               ]),
               const SizedBox(height: 20),
-              _lbl('들은 내용을 입력하세요'),
+              // TTS 오류 표시된 약어 / 보면서 테스트 라운드: 정답 텍스트를 보여줌
+              if (showText) Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 16),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFFFE0B0))),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(_seeRound ? 'TTS 오류 약어 · 보면서 입력' : 'TTS 오류로 표시된 약어',
+                      style: const TextStyle(fontSize: 11, color: Color(0xFFE65100), fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 6),
+                  SelectionArea(child: Text(curText,
+                      style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kBlueDark))),
+                ])),
+              _lbl(showText ? '보이는 내용을 입력하세요' : '들은 내용을 입력하세요'),
               TextField(
                 controller: _answerCtrl,
                 focusNode: _inputFocusNode,
@@ -6463,7 +6520,8 @@ Widget _buildQuiz() {
                 style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-                child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음' : '제출 → 결과 보기',
+                child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음'
+                    : (!_seeRound && _ttsFlagged.isNotEmpty ? '제출 → TTS 오류 약어 테스트' : '제출 → 결과 보기'),
                     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)))),
             ]))),
         ]))));
@@ -6493,7 +6551,7 @@ Widget _buildQuiz() {
           child: Column(children: [
             Text('$correct / $total',
                 style: const TextStyle(fontSize: 40, fontWeight: FontWeight.w900, color: kBlueDark)),
-            Text('${(correct / total * 100).round()}점',
+            Text('${total == 0 ? 0 : (correct / total * 100).round()}점',
                 style: const TextStyle(fontSize: 18, color: kBlue, fontWeight: FontWeight.w700)),
           ])),
         const SizedBox(height: 20),
