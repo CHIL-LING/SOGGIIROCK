@@ -2257,7 +2257,8 @@ class _PracticePadState extends State<_PracticePad> {
                 decoration: const InputDecoration(
                   hintText: '여기에 타이핑하면 순공시간이 기록돼요...',
                   border: InputBorder.none, enabledBorder: InputBorder.none, focusedBorder: InputBorder.none,
-                  isCollapsed: true, contentPadding: EdgeInsets.zero)))),
+                  // 오른쪽 여백: 스크롤바가 글자에 붙지 않게
+                  isCollapsed: true, contentPadding: EdgeInsets.only(right: 14))))),
             const SizedBox(height: 6),
             _bottomButtons(),
           ])));
@@ -2880,7 +2881,7 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
                       // 왼쪽: 약어 확인 중인 글 (자체 스크롤)
                       Expanded(child: SingleChildScrollView(
                         keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
-                        padding: const EdgeInsets.fromLTRB(16, 0, 8, 0),
+                        padding: const EdgeInsets.fromLTRB(16, 0, 22, 0), // 오른쪽 여백: 스크롤바가 글자에 붙지 않게
                         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: bodyWidgets))),
                       Container(width: 1, color: const Color(0xFFEEF0F8)),
                       // 오른쪽: 연습장 (왼쪽과 따로 스크롤 · 결과 글상자와 같은 크기/글자 시작 위치)
@@ -5029,6 +5030,19 @@ class _SprintDiff {
   const _SprintDiff(this.oja, this.chum, this.tal, this.alignEnd, this.states);
 }
 
+// 결과 화면용 글자별 비교 (ok 맞음 / oja 오자 / chum 첨자 / tal 탈자)
+class _SOp {
+  final String kind;
+  final String typed, target; // 친 글자 / 원문 글자 (해당 없으면 '')
+  const _SOp(this.kind, this.typed, this.target);
+}
+class _SprintSentenceResult {
+  final String target;        // 원문 (공백·줄바꿈 포함)
+  final List<int> normToFull; // 공백 뺀 위치 → 원문 위치
+  final List<_SOp> ops;
+  const _SprintSentenceResult(this.target, this.normToFull, this.ops);
+}
+
 class _TypingPracticeScreenState extends State<TypingPracticeScreen> with SingleTickerProviderStateMixin {
   static const int kLongLines = 20; // 이 줄 수를 넘으면 위 2/3 · 아래 1/3 배치
   static const double kBoxPad = 16;
@@ -5053,6 +5067,9 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   int _sprintMs = 0; // 이번 스프린트에서 쌓은 순공시간 (결과 화면용)
   Timer? _timer;
   bool _advancing = false;
+
+  // 결과 화면에 보여줄 문장별 비교 결과
+  final List<_SprintSentenceResult> _sentenceResults = [];
 
   // 끝낸 문장들의 누적 / 지금 치는 문장
   int _accOja = 0, _accChum = 0, _accTal = 0, _accTyped = 0, _doneCount = 0;
@@ -5122,8 +5139,20 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     }
     items.removeWhere((e) => _stripWs(e).isEmpty);
     if (items.isEmpty) return;
+    _startRun(items);
+  }
+
+  // 같은 문장들로 처음부터 다시 시작 (결과 화면의 '다시 시작')
+  void _restartSame() {
+    if (_queue.isEmpty) return;
+    _startRun(List<String>.from(_queue));
+  }
+
+  void _startRun(List<String> items) {
     _timer?.cancel();
+    _ticker.stop();
     setState(() {
+      _sentenceResults.clear();
       _queue = items; _idx = 0;
       _started = true; _finished = false; _stoppedEarly = false; _savedToHome = false;
       _elapsedSec = 0; _sprintMs = 0;
@@ -5159,6 +5188,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   // ── 끝내기 / 중단 / 처음으로 ──
   Future<void> _finishRun({required bool stopped}) async {
     if (!_started || _finished) return;
+    if (stopped) _recordSentenceResult(partial: true); // 중단: 친 만큼만 결과에 표시
     _timer?.cancel();
     _ticker.stop();
     _sprintMs = TypingTracker.sprint.activeMs;
@@ -5188,6 +5218,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       _elapsedSec = 0; _sprintMs = 0;
       _accOja = 0; _accChum = 0; _accTal = 0; _accTyped = 0; _doneCount = 0;
       _ojaCnt = 0; _chumCnt = 0; _talCnt = 0; _totalTyped = 0;
+      _sentenceResults.clear();
     });
   }
 
@@ -5221,6 +5252,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     if (typedN.isEmpty) return; // 아무것도 안 쳤으면 넘기지 않음
     final d = _diff(typedN, _targetN);
     final missing = _targetN.length - d.alignEnd; // 끝까지 못 친 글자는 탈자로 계산
+    _recordSentenceResult(partial: false);
     _accOja += d.oja; _accChum += d.chum; _accTal += d.tal + missing;
     _accTyped += _countTasu(typedN);
     _doneCount++;
@@ -5322,6 +5354,47 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     return _SprintDiff(oja, chum, tal, jEnd, states);
   }
 
+  // _diff가 계산해 둔 표(_dpRows)에서 값 읽기
+  int _dpAt(int i, int j, int m) {
+    const int w = 200, inf = 1 << 28, width = 2 * w + 1;
+    if (i < 0 || j < 0 || j > m || i >= _dpRows.length) return inf;
+    final c = j - (i - w);
+    if (c < 0 || c >= width) return inf;
+    return _dpRows[i][c];
+  }
+
+  // 결과 화면용: 글자별로 맞음/오자/첨자/탈자를 구한다 (셈하는 방식은 _diff와 같음)
+  List<_SOp> _traceOps(String typed, String target, {required bool fillTail}) {
+    final d = _diff(typed, target);
+    final m = target.length;
+    final rev = <_SOp>[];
+    int i = typed.length, j = d.alignEnd;
+    while (i > 0 || j > 0) {
+      if (i > 0 && j > 0 && typed[i - 1] == target[j - 1]) {
+        rev.add(_SOp('ok', typed[i - 1], target[j - 1])); i--; j--;
+      } else if (i > 0 && j > 0 && _dpAt(i, j, m) == _dpAt(i - 1, j - 1, m) + 1) {
+        rev.add(_SOp('oja', typed[i - 1], target[j - 1])); i--; j--;
+      } else if (i > 0 && _dpAt(i, j, m) == _dpAt(i - 1, j, m) + 1) {
+        rev.add(_SOp('chum', typed[i - 1], '')); i--;
+      } else if (j > 0) {
+        rev.add(_SOp('tal', '', target[j - 1])); j--;
+      } else { break; }
+    }
+    final out = rev.reversed.toList();
+    // 끝까지 못 친 뒷부분: 문장을 마친 경우만 탈자로 표시 (중단하면 친 만큼만)
+    if (fillTail) {
+      for (int k = d.alignEnd; k < m; k++) { out.add(_SOp('tal', '', target[k])); }
+    }
+    return out;
+  }
+
+  void _recordSentenceResult({required bool partial}) {
+    final typedN = _stripWs(_inputCtrl.text);
+    if (typedN.isEmpty) return;
+    _sentenceResults.add(_SprintSentenceResult(
+        _target, List<int>.from(_normToFull), _traceOps(typedN, _targetN, fillTail: !partial)));
+  }
+
   // ── 긴 글 자동 스크롤: 치고 있는 자리를 문장 칸 가운데로 부드럽게 ──
   TextPainter _painter(double width) {
     final key = '${_target.hashCode}|${width.round()}';
@@ -5381,7 +5454,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     final ex = Store.getRecord(key);
     final hm = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
     final line = '[스프린트 $hm] 문장 $_doneCount/${_queue.length} · ${_tasu.round()}타수 · '
-        '정확도 ${_accuracy.round()}% · 오자 $_sumOja 첨자 $_sumChum 탈자 $_sumTal · ${_fmtSec(_elapsedSec)}'
+        '정확도 ${_accuracy.toStringAsFixed(2)}% · 오자 $_sumOja 첨자 $_sumChum 탈자 $_sumTal · ${_fmtSec(_elapsedSec)}'
         '${_stoppedEarly ? ' (중단)' : ''}';
     final oldMemo = ex?.memo ?? '';
     await Store.saveRecord(StudyRecordModel(
@@ -5449,6 +5522,76 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     return spans;
   }
 
+  // 결과 화면: 내가 친 글에 탈자(빨강)·첨자(녹색)·오자(파랑, 아래에 원문을 빨간 작은 글씨로) 표시
+  List<InlineSpan> _diffSpans(_SprintSentenceResult r) {
+    const base = TextStyle(fontSize: 18, fontWeight: FontWeight.w700, height: 1.5);
+    final spans = <InlineSpan>[];
+    final buf = StringBuffer();
+    Color bufColor = Colors.black87;
+    void flush() {
+      if (buf.isEmpty) return;
+      spans.add(TextSpan(text: buf.toString(), style: base.copyWith(color: bufColor)));
+      buf.clear();
+    }
+    void put(String t, Color c) {
+      if (bufColor != c) { flush(); bufColor = c; }
+      buf.write(t);
+    }
+    int tIdx = 0, lastFull = -1;
+    // 원문 글자 하나를 소비하면서, 그 앞의 공백·줄바꿈을 그대로 넣는다
+    void consume({required bool withWs}) {
+      if (tIdx < r.normToFull.length) {
+        final full = r.normToFull[tIdx];
+        if (withWs && full - lastFull > 1) buf.write(r.target.substring(lastFull + 1, full));
+        lastFull = full;
+      }
+      tIdx++;
+    }
+    int k = 0;
+    while (k < r.ops.length) {
+      final op = r.ops[k];
+      if (op.kind == 'ok') { consume(withWs: true); put(op.target, Colors.black87); k++; }
+      else if (op.kind == 'tal') { consume(withWs: true); put(op.target, _kTalColor); k++; }
+      else if (op.kind == 'chum') { put(op.typed, _kChumColor); k++; }
+      else {
+        // 오자: 이어진 글자는 한 덩어리로 묶어 아래에 원문을 괄호로 표시
+        final typedB = StringBuffer(), origB = StringBuffer();
+        bool first = true;
+        while (k < r.ops.length && r.ops[k].kind == 'oja') {
+          consume(withWs: first); first = false;
+          typedB.write(r.ops[k].typed); origB.write(r.ops[k].target); k++;
+        }
+        flush();
+        spans.add(WidgetSpan(
+          alignment: PlaceholderAlignment.baseline, baseline: TextBaseline.alphabetic,
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Text(typedB.toString(), style: base.copyWith(color: _kOjaColor)),
+            Text('($origB)', style: const TextStyle(fontSize: 10, height: 1.1,
+                fontWeight: FontWeight.w700, color: _kTalColor)),
+          ])));
+      }
+    }
+    flush();
+    return spans;
+  }
+
+  Widget _buildDiffView() {
+    final multi = _sentenceResults.length > 1;
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      for (int i = 0; i < _sentenceResults.length; i++) ...[
+        if (i > 0) const SizedBox(height: 10),
+        Container(width: double.infinity, padding: const EdgeInsets.all(kBoxPad),
+          decoration: BoxDecoration(color: const Color(0xFFF8F8F8), borderRadius: BorderRadius.circular(12)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            if (multi) Padding(padding: const EdgeInsets.only(bottom: 6),
+              child: Text('문장 ${i + 1}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.w700))),
+            Text.rich(TextSpan(children: _diffSpans(_sentenceResults[i]))),
+          ])),
+      ],
+    ]);
+  }
+
   // ── 화면 ──
   @override
   Widget build(BuildContext context) {
@@ -5493,9 +5636,12 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
             const SizedBox(height: 12),
             _buildStats(),
             const SizedBox(height: 16),
-            Container(width: double.infinity, padding: const EdgeInsets.all(kBoxPad),
-              decoration: BoxDecoration(color: const Color(0xFFF8F8F8), borderRadius: BorderRadius.circular(12)),
-              child: RichText(text: TextSpan(children: _buildColoredText()))),
+            if (_finished && _sentenceResults.isNotEmpty)
+              _buildDiffView()
+            else
+              Container(width: double.infinity, padding: const EdgeInsets.all(kBoxPad),
+                decoration: BoxDecoration(color: const Color(0xFFF8F8F8), borderRadius: BorderRadius.circular(12)),
+                child: RichText(text: TextSpan(children: _buildColoredText()))),
             const SizedBox(height: 12),
             if (!_finished) _buildInput(expand: false) else _buildResult(),
           ]));
@@ -5526,7 +5672,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       Wrap(spacing: 8, runSpacing: 6, children: [
         _statChip(Icons.timer_rounded, '$_elapsedSec초', kBlue),
         _statChip(Icons.speed_rounded, '${_tasu.round()} 타수', kPurple),
-        _statChip(Icons.check_circle_rounded, '${_accuracy.round()}%', Colors.green),
+        _statChip(Icons.check_circle_rounded, '${_accuracy.toStringAsFixed(2)}%', Colors.teal.shade700),
         // 타율(정확도) 오른쪽: 이번 스프린트에서 쌓인 순공시간
         AnimatedBuilder(animation: TypingTracker.sprint, builder: (context, _) =>
           _statChip(Icons.hourglass_bottom_rounded,
@@ -5534,9 +5680,9 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       ]),
       const SizedBox(height: 6),
       Wrap(spacing: 8, runSpacing: 6, children: [
-        _statChip(Icons.swap_horiz_rounded, '오자 $_sumOja', Colors.red),
-        _statChip(Icons.add_rounded, '첨자 $_sumChum', Colors.orange),
-        _statChip(Icons.remove_rounded, '탈자 $_sumTal', Colors.deepOrange),
+        _statChip(Icons.swap_horiz_rounded, '오자 $_sumOja', _kOjaColor),
+        _statChip(Icons.add_rounded, '첨자 $_sumChum', _kChumColor),
+        _statChip(Icons.remove_rounded, '탈자 $_sumTal', _kTalColor),
       ]),
       if (!_finished) Padding(padding: const EdgeInsets.only(top: 8),
         child: Text('문장 ${_idx + 1} / ${_queue.length}  ·  Enter: ${last ? '결과 보기' : '다음 문장'}  ·  Esc: 중단',
@@ -5594,13 +5740,13 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
         Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
           _resultItem('시간', '$_elapsedSec초'),
           _resultItem('타수', '${_tasu.round()}'),
-          _resultItem('정확도', '${_accuracy.round()}%'),
+          _resultItem('정확도', '${_accuracy.toStringAsFixed(2)}%'),
         ]),
         const SizedBox(height: 8),
         Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-          _resultItem('오자', '$_sumOja개'),
-          _resultItem('첨자', '$_sumChum개'),
-          _resultItem('탈자', '$_sumTal개'),
+          _resultItem('오자', '$_sumOja개', color: _kOjaColor),
+          _resultItem('첨자', '$_sumChum개', color: _kChumColor),
+          _resultItem('탈자', '$_sumTal개', color: _kTalColor),
         ]),
         const SizedBox(height: 8),
         _resultItem('순공시간', formatTypingLong(_sprintMs)),
@@ -5613,10 +5759,16 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
             style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
           ElevatedButton.icon(
-            onPressed: _reset,
+            onPressed: _restartSame,
             icon: const Icon(Icons.refresh_rounded),
-            label: const Text('다시 하기'),
+            label: const Text('다시 시작'),
             style: ElevatedButton.styleFrom(backgroundColor: Colors.green, foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
+          ElevatedButton.icon(
+            onPressed: _reset,
+            icon: const Icon(Icons.home_rounded),
+            label: const Text('처음 화면'),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlueDark, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
         ]),
       ])));
@@ -5703,11 +5855,16 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       Text(label, style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w700)),
     ]));
 
-  Widget _resultItem(String label, String value) => Column(children: [
-    Text(value, style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: kBlueDark)),
+  Widget _resultItem(String label, String value, {Color color = kBlueDark}) => Column(children: [
+    Text(value, style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: color)),
     Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
   ]);
 }
+
+// 스프린트 결과 색: 탈자 빨강 · 첨자 녹색 · 오자 파랑
+const Color _kTalColor = Color(0xFFE53935);
+const Color _kChumColor = Color(0xFF2E9E4F);
+const Color _kOjaColor = Color(0xFF1E6BFF);
 
 bool _isWs(String ch) => ch.trim().isEmpty;
 final RegExp _wsRe = RegExp(r'\s');
@@ -5991,6 +6148,12 @@ class _QuizScreenState extends State<QuizScreen> {
       'item': q,
     });
 
+    // 이번 테스트에서 TTS 오류로 표시한 약어가 (중복 출제 등으로) 텍스트를 보며 이미 채점됐다면
+    // 마지막 '보고 테스트' 라운드에서 다시 묻지 않는다
+    if (!_seeRound) {
+      _ttsFlagged.removeWhere((f) => _itemText(f) == correctText);
+    }
+
     Store.logQuizSeen(correctText); // 마지막 테스트 시각 기록
     if (wrongWords.isNotEmpty) {
       Store.logQuizWrong(correctText);
@@ -6165,45 +6328,104 @@ class _QuizScreenState extends State<QuizScreen> {
         }));
   }
 
-  // TTS 오류 약어 목록 (여기서 직접 해제)
+  // TTS 오류 약어 목록 (검색 + 체크박스로 선택해서 해제)
   void _showTtsErrorList() {
+    final searchCtrl = TextEditingController();
+    final selected = <String>{};
+    String query = '';
     showModalBottomSheet(
       context: context, isScrollControlled: true, backgroundColor: Colors.white,
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
       builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
-        final list = Store.getTtsErrors();
-        return SafeArea(child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
-          child: Padding(padding: const EdgeInsets.all(20), child: Column(
-            mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text('TTS 오류 약어 (${list.length}개)',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 4),
-            const Text('해제하면 다음 테스트부터 텍스트 없이 소리로만 출제돼요.',
-                style: TextStyle(fontSize: 11, color: Colors.grey)),
-            const SizedBox(height: 12),
-            if (list.isEmpty)
-              const Padding(padding: EdgeInsets.symmetric(vertical: 24),
-                child: Center(child: Text('표시한 약어가 없어요.', style: TextStyle(color: Colors.grey))))
-            else
-              Flexible(child: ListView.separated(
-                shrinkWrap: true,
-                itemCount: list.length,
-                separatorBuilder: (_, __) => const Divider(height: 1),
-                itemBuilder: (_, i) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
+        final all = Store.getTtsErrors();
+        final q = query.trim();
+        final list = q.isEmpty ? all : all.where((t) => t.contains(q)).toList();
+        final allChecked = list.isNotEmpty && list.every(selected.contains);
+        return SafeArea(child: Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+            child: Padding(padding: const EdgeInsets.all(20), child: Column(
+              mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('TTS 오류 약어 (${all.length}개)',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 4),
+              const Text('체크하고 해제하면 다음 테스트부터 텍스트 없이 소리로만 출제돼요.',
+                  style: TextStyle(fontSize: 11, color: Colors.grey)),
+              const SizedBox(height: 12),
+              TextField(
+                controller: searchCtrl,
+                onChanged: (v) => setS(() => query = v),
+                decoration: InputDecoration(
+                  hintText: '약어 검색',
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  suffixIcon: query.isEmpty ? null : IconButton(
+                    icon: const Icon(Icons.close, size: 16),
+                    onPressed: () { searchCtrl.clear(); setS(() => query = ''); }),
+                  isDense: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                      borderSide: const BorderSide(color: kBlue)))),
+              const SizedBox(height: 8),
+              if (list.isEmpty)
+                Padding(padding: const EdgeInsets.symmetric(vertical: 24),
+                  child: Center(child: Text(all.isEmpty ? '표시한 약어가 없어요.' : '검색 결과가 없어요.',
+                      style: const TextStyle(color: Colors.grey))))
+              else ...[
+                InkWell(
+                  onTap: () => setS(() {
+                    if (allChecked) { selected.removeAll(list); } else { selected.addAll(list); }
+                  }),
                   child: Row(children: [
-                    Expanded(child: SelectionArea(child: Text(list[i],
-                        style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)))),
-                    TextButton(
-                      onPressed: () async {
-                        await Store.removeTtsError(list[i]);
-                        setS(() {});
-                        if (mounted) setState(() {});
-                      },
-                      child: const Text('해제', style: TextStyle(color: Colors.red, fontWeight: FontWeight.w700))),
-                  ])))),
-          ]))));
+                    Checkbox(
+                      value: allChecked, activeColor: kBlue,
+                      visualDensity: VisualDensity.compact,
+                      onChanged: (v) => setS(() {
+                        if (allChecked) { selected.removeAll(list); } else { selected.addAll(list); }
+                      })),
+                    Text(q.isEmpty ? '전체 선택' : '검색 결과 전체 선택 (${list.length}개)',
+                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: Colors.grey)),
+                  ])),
+                const Divider(height: 1),
+                Flexible(child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: list.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = list[i];
+                    final on = selected.contains(t);
+                    return InkWell(
+                      onTap: () => setS(() { if (on) { selected.remove(t); } else { selected.add(t); } }),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(children: [
+                          Checkbox(
+                            value: on, activeColor: kBlue,
+                            visualDensity: VisualDensity.compact,
+                            onChanged: (v) => setS(() { if (on) { selected.remove(t); } else { selected.add(t); } })),
+                          Expanded(child: Text(t,
+                              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+                        ])));
+                  })),
+              ],
+              const SizedBox(height: 12),
+              SizedBox(width: double.infinity, child: ElevatedButton(
+                onPressed: selected.isEmpty ? null : () async {
+                  for (final t in selected.toList()) {
+                    await Store.removeTtsError(t);
+                  }
+                  selected.clear();
+                  setS(() {});
+                  if (mounted) setState(() {});
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.red, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+                child: Text(selected.isEmpty ? '해제할 약어를 체크하세요' : '선택한 ${selected.length}개 해제',
+                    style: const TextStyle(fontWeight: FontWeight.w700)))),
+            ])))));
       }));
   }
 
@@ -6521,7 +6743,8 @@ Widget _buildQuiz() {
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
                 child: Text(_currentIdx < _questions.length - 1 ? '제출 → 다음'
-                    : (!_seeRound && _ttsFlagged.isNotEmpty ? '제출 → TTS 오류 약어 테스트' : '제출 → 결과 보기'),
+                    : (!_seeRound && _ttsFlagged.any((f) => _itemText(f) != curText)
+                        ? '제출 → TTS 오류 약어 테스트' : '제출 → 결과 보기'),
                     style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)))),
             ]))),
         ]))));
