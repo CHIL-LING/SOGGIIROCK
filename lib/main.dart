@@ -496,6 +496,193 @@ class Store {
     await Hive.box('settings').put(_ttsErrKey, list);
   }
 
+
+  // ── 주춤 약어 (백스페이스 2회 이상 / 5초 무입력) ────────────────────────────
+  // 기준 숫자는 설정에서 바꿀 수 있음
+  static int _hzCfg(String k, int def) => Hive.box('settings').get(k, defaultValue: def) as int;
+  static int hzBackspace() => _hzCfg('_hz_bs', 2);   // 백스페이스 N회 이상이면 주춤
+  static int hzSecs() => _hzCfg('_hz_secs', 5);      // TTS 재생 후 N초 안에 입력 시작 안 하면 주춤
+  static int hzGoal() => _hzCfg('_hz_goal', 10);     // 주춤 없이 연속 정답 N회면 졸업
+  static int hzDayCap() => _hzCfg('_hz_cap', 3);     // 하루에 인정되는 횟수 한도
+  static Future<void> setHzCfg(String key, int v) => Hive.box('settings').put(key, v);
+
+  // 약어(텍스트)별 연속 정답 횟수 {c: 횟수, d: 마지막으로 횟수를 올린 날, n: 그날 올린 횟수}
+  // 주춤 그룹에 들어 있는 약어만 기록한다.
+  static Map<String, Map<String, dynamic>> _hzMap() {
+    final raw = Hive.box('settings').get('_hz_counts', defaultValue: <dynamic, dynamic>{}) as Map;
+    return raw.map((k, v) => MapEntry(k as String, Map<String, dynamic>.from(v as Map)));
+  }
+  static Future<void> _hzSave(Map<String, Map<String, dynamic>> m) =>
+      Hive.box('settings').put('_hz_counts', m);
+  static int hzCount(String text) => (_hzMap()[text]?['c'] as int?) ?? 0;
+  static bool hzTracked(String text) => _hzMap().containsKey(text);
+
+  // 테스트 결과 반영: 틀리면 0 / 정답인데 주춤하면 절반(내림) / 깨끗한 정답이면 +1 (하루 한도 있음)
+  static Future<void> hzOnResult(String text, {required bool correct, required bool hesitated}) async {
+    final m = _hzMap();
+    final e = m[text];
+    if (e == null) return;
+    var c = (e['c'] as int?) ?? 0;
+    if (!correct) {
+      c = 0;
+    } else if (hesitated) {
+      c = c ~/ 2;
+    } else {
+      final today = _ymd(DateTime.now());
+      var n = (e['n'] as int?) ?? 0;
+      if (e['d'] != today) { n = 0; e['d'] = today; }
+      if (n < hzDayCap()) { c += 1; n += 1; }
+      e['n'] = n;
+    }
+    e['c'] = c;
+    await _hzSave(m);
+  }
+
+  // 주 그룹 (월~일). {그룹 id: 그 주 월요일 yyyy-mm-dd}
+  static Map<String, String> hzGroupMap() {
+    final raw = Hive.box('settings').get('_hz_groups', defaultValue: <dynamic, dynamic>{}) as Map;
+    return raw.map((k, v) => MapEntry(k as String, v as String));
+  }
+  static DateTime hzWeekStart(DateTime d) {
+    final day = DateTime(d.year, d.month, d.day);
+    return day.subtract(Duration(days: day.weekday - 1)); // 월요일
+  }
+  // 그 주의 목요일이 속한 달의 n째 주 (예: 11월 1째주)
+  static String hzGroupName(DateTime weekStart) {
+    final thu = weekStart.add(const Duration(days: 3));
+    final nth = (thu.day - 1) ~/ 7 + 1;
+    return '${thu.month}월 $nth째주 주춤 약어';
+  }
+  static String hzGroupId(DateTime weekStart) => 'hz_${_ymd(weekStart)}';
+
+  // 주춤한 약어들을 이번 주 그룹에 넣는다. 먼저 있던 주춤 그룹에서는 옮겨 온다. 횟수는 유지(새로 들어오면 0).
+  static Future<int> hzAddItems(List<AbbreviationModel> items) async {
+    if (items.isEmpty) return 0;
+    final ws = hzWeekStart(DateTime.now());
+    final gid = hzGroupId(ws);
+    final reg = hzGroupMap();
+    if (findGroup(gid) == null) {
+      await saveGroup(GroupModel(id: gid, name: hzGroupName(ws), colorValue: 0xFFFF9800));
+    }
+    reg[gid] = _ymd(ws);
+    await Hive.box('settings').put('_hz_groups', reg);
+    final counts = _hzMap();
+    var added = 0;
+    for (final it in items) {
+      final others = it.groupIds.where((id) => id != gid && reg.containsKey(id)).toSet();
+      final ids = it.groupIds.where((id) => !others.contains(id)).toList();
+      if (!ids.contains(gid)) { ids.add(gid); added++; }
+      await saveAbbreviation(it.copyWith(groupIds: ids));
+      counts.putIfAbsent(it.quizText, () => <String, dynamic>{'c': 0});
+    }
+    await _hzSave(counts);
+    await hzCleanEmpty();
+    return added;
+  }
+
+  static List<AbbreviationModel> hzGroupItems(String gid) =>
+      getAbbreviations().where((a) => a.groupIds.contains(gid)).toList();
+
+  // 비어 버린 주춤 그룹은 자동으로 정리 (다른 그룹은 건드리지 않음)
+  static Future<void> hzCleanEmpty() async {
+    final reg = hzGroupMap();
+    final all = getAbbreviations();
+    var changed = false;
+    for (final gid in reg.keys.toList()) {
+      final has = all.any((a) => a.groupIds.contains(gid));
+      if (!has || findGroup(gid) == null) {
+        await deleteGroup(gid);
+        reg.remove(gid);
+        changed = true;
+      }
+    }
+    if (changed) await Hive.box('settings').put('_hz_groups', reg);
+  }
+
+  // 그 그룹에서 졸업(연속 정답 목표 달성)한 약어
+  static List<AbbreviationModel> hzGraduates(String gid) {
+    final goal = hzGoal();
+    return hzGroupItems(gid).where((a) => hzCount(a.quizText) >= goal).toList();
+  }
+  // 다음 주 월요일 이후부터 삭제·리마인드 대상
+  static bool hzIsDue(String gid) {
+    final ws = DateTime.tryParse(hzGroupMap()[gid] ?? '');
+    if (ws == null) return false;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    return !today.isBefore(ws.add(const Duration(days: 7)));
+  }
+  static Future<void> hzRemoveFromGroup(String gid, List<AbbreviationModel> items) async {
+    final counts = _hzMap();
+    for (final it in items) {
+      final ids = it.groupIds.where((id) => id != gid).toList();
+      await saveAbbreviation(it.copyWith(groupIds: ids));
+      // 다른 주춤 그룹에도 없으면 횟수 기록 삭제
+      final reg = hzGroupMap();
+      if (!ids.any((id) => reg.containsKey(id))) counts.remove(it.quizText);
+    }
+    await _hzSave(counts);
+    await hzCleanEmpty();
+  }
+  static List<MapEntry<String, String>> hzGroupsSorted() {
+    final reg = hzGroupMap();
+    final list = reg.entries.where((e) => findGroup(e.key) != null).toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return list;
+  }
+
+  // ── 스프린트 문장 그룹 ─────────────────────────────────────────────────
+  static List<Map<String, dynamic>> getSentenceGroups() {
+    final raw = Hive.box('settings').get('_sg_list', defaultValue: <dynamic>[]) as List;
+    return raw.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
+  static Future<void> _saveSentenceGroups(List<Map<String, dynamic>> l) =>
+      Hive.box('settings').put('_sg_list', l);
+  static Map<String, List<String>> _sgAssign() {
+    final raw = Hive.box('settings').get('_sg_assign', defaultValue: <dynamic, dynamic>{}) as Map;
+    return raw.map((k, v) => MapEntry(k as String, List<String>.from(v as List)));
+  }
+  static List<String> sentenceGroupIds(String sentenceId) => _sgAssign()[sentenceId] ?? <String>[];
+  static Map<String, List<String>> sentenceGroupMap() => _sgAssign();
+  static Future<String> addSentenceGroup(String name, int colorValue) async {
+    final l = getSentenceGroups();
+    final id = 'sg_${DateTime.now().millisecondsSinceEpoch}';
+    l.add({'id': id, 'name': name, 'colorValue': colorValue});
+    await _saveSentenceGroups(l);
+    return id;
+  }
+  static Future<void> renameSentenceGroup(String id, String name) async {
+    final l = getSentenceGroups();
+    for (final g in l) { if (g['id'] == id) g['name'] = name; }
+    await _saveSentenceGroups(l);
+  }
+  static Future<void> deleteSentenceGroup(String id) async {
+    final l = getSentenceGroups()..removeWhere((g) => g['id'] == id);
+    await _saveSentenceGroups(l);
+    final a = _sgAssign();
+    for (final k in a.keys.toList()) { a[k]!.remove(id); if (a[k]!.isEmpty) a.remove(k); }
+    await Hive.box('settings').put('_sg_assign', a);
+  }
+  static Future<void> addSentencesToGroup(List<String> sentenceIds, String groupId) async {
+    final a = _sgAssign();
+    for (final sid in sentenceIds) {
+      final cur = a[sid] ?? <String>[];
+      if (!cur.contains(groupId)) cur.add(groupId);
+      a[sid] = cur;
+    }
+    await Hive.box('settings').put('_sg_assign', a);
+  }
+  static Future<void> removeSentencesFromGroup(List<String> sentenceIds, String groupId) async {
+    final a = _sgAssign();
+    for (final sid in sentenceIds) {
+      final cur = a[sid];
+      if (cur == null) continue;
+      cur.remove(groupId);
+      if (cur.isEmpty) a.remove(sid);
+    }
+    await Hive.box('settings').put('_sg_assign', a);
+  }
+
   // 오늘 테스트 정답률 기록
   static Future<void> logTodayQuizResult(int correct, int total) async {
     final box = Hive.box('settings');
@@ -1498,6 +1685,8 @@ class _MainShellState extends State<MainShell> with SingleTickerProviderStateMix
       ..repeat(reverse: true);
     _blinkAnim = Tween<double>(begin: 0.4, end: 1.0).animate(_blinkCtrl);
     WidgetsBinding.instance.addPostFrameCallback((_) => _checkTodayReminders());
+    WidgetsBinding.instance.addPostFrameCallback(
+        (_) => Future.delayed(const Duration(milliseconds: 500), _checkHzDue));
     kTabRequest.addListener(_onTabRequest);
   }
 
@@ -1553,6 +1742,15 @@ void _checkTodayReminders() {
         final dismissed = settingsBox.get(dismissedKey) == true;
         setState(() => _hasReminder = !dismissed);
       });
+  }
+  // 지난주 주춤 약어 그룹이 있으면(다음 주 월요일 이후) 테스트 알림
+  void _checkHzDue() {
+    if (!mounted) return;
+    final today = _todayStr();
+    if (Hive.box('settings').get('_hz_dismissed_$today') == true) return;
+    final due = Store.hzGroupsSorted().where((e) => Store.hzIsDue(e.key)).map((e) => e.key).toList();
+    if (due.isEmpty) return;
+    showHzDueDialog(context, due, today);
   }
   String _todayStr() {
     final now = DateTime.now();
@@ -4489,14 +4687,14 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
               Focus(onKeyEvent: (node, event) {
                 if (event is KeyDownEvent &&
                     (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) &&
-                    HardwareKeyboard.instance.isControlPressed) {
+                    HardwareKeyboard.instance.isShiftPressed) {
                   _save(context);
                   return KeyEventResult.handled;
                 }
                 return KeyEventResult.ignored;
               },
               child: TextField(controller: _ctrl, focusNode: _focusNode, maxLines: 3,
-                decoration: InputDecoration(hintText: '복습할 문장을 입력하세요... (Ctrl+Enter로 저장)',
+                decoration: InputDecoration(hintText: '복습할 문장을 입력하세요... (Shift+Enter로 저장)',
                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: kBlue))))),
               const SizedBox(height: 8),
@@ -5057,6 +5255,10 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
 
   // 문장 선택 (저장된 문장 id, 누른 순서대로)
   final List<String> _selectedIds = [];
+  // 문장 그룹 보기: '' 전체 / '__none__' 미분류 / 그 외 그룹 id
+  String _sgFilter = '';
+  String _sgQuery = '';
+  final TextEditingController _sgSearchCtrl = TextEditingController();
 
   // 진행 상태
   List<String> _queue = [];
@@ -5773,13 +5975,126 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
         ]),
       ])));
 
+  // ── 문장 그룹 도우미 ──
+  Color _sgColor(Map<String, dynamic> g) => Color(g['colorValue'] as int);
+
+  Future<String?> _askGroupName(String title, {String initial = ''}) async {
+    final ctrl = TextEditingController(text: initial);
+    return showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: TextField(controller: ctrl, autofocus: true,
+          decoration: _inputDeco('그룹 이름 (예: 경제 기사, 오답 문장)'),
+          onSubmitted: (v) => Navigator.pop(ctx, v.trim())),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            child: const Text('확인')),
+      ]));
+  }
+
+  Future<void> _createSentenceGroup() async {
+    final name = await _askGroupName('새 문장 그룹');
+    if (name == null || name.isEmpty) return;
+    final n = Store.getSentenceGroups().length;
+    final id = await Store.addSentenceGroup(name, kGroupColors[n % kGroupColors.length].value);
+    if (mounted) setState(() => _sgFilter = id);
+  }
+
+  // 길게 누르면: 이름 바꾸기 / 그룹 삭제 (문장은 지워지지 않음)
+  Future<void> _sentenceGroupMenu(Map<String, dynamic> g) async {
+    final act = await showModalBottomSheet<String>(
+      context: context, backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        Padding(padding: const EdgeInsets.all(16),
+            child: Text(g['name'] as String, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800))),
+        ListTile(leading: const Icon(Icons.edit_rounded), title: const Text('이름 바꾸기'),
+            onTap: () => Navigator.pop(ctx, 'rename')),
+        ListTile(leading: const Icon(Icons.delete_outline_rounded, color: Colors.red),
+            title: const Text('그룹 삭제 (문장은 그대로 남아요)', style: TextStyle(color: Colors.red)),
+            onTap: () => Navigator.pop(ctx, 'delete')),
+      ])));
+    if (act == 'rename') {
+      final name = await _askGroupName('그룹 이름 바꾸기', initial: g['name'] as String);
+      if (name != null && name.isNotEmpty) {
+        await Store.renameSentenceGroup(g['id'] as String, name);
+        if (mounted) setState(() {});
+      }
+    } else if (act == 'delete') {
+      await Store.deleteSentenceGroup(g['id'] as String);
+      if (mounted) setState(() { if (_sgFilter == g['id']) _sgFilter = ''; });
+    }
+  }
+
+  // 선택한 문장들을 그룹에 담기 (기존 그룹 선택 또는 새 그룹)
+  Future<void> _assignSelectedToGroup() async {
+    if (_selectedIds.isEmpty) return;
+    final groups = Store.getSentenceGroups();
+    final choice = await showModalBottomSheet<String>(
+      context: context, backgroundColor: Colors.white, isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => SafeArea(child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(padding: const EdgeInsets.all(16),
+              child: Text('선택한 ${_selectedIds.length}개 문장을 담을 그룹',
+                  style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800))),
+          Flexible(child: ListView(shrinkWrap: true, children: [
+            ListTile(leading: const Icon(Icons.add_circle_outline_rounded, color: kBlue),
+                title: const Text('새 그룹 만들기'), onTap: () => Navigator.pop(ctx, '__new__')),
+            ...groups.map((g) => ListTile(
+              leading: Icon(Icons.folder_rounded, color: _sgColor(g)),
+              title: Text(g['name'] as String),
+              onTap: () => Navigator.pop(ctx, g['id'] as String))),
+          ])),
+        ]))));
+    if (choice == null) return;
+    String gid = choice;
+    if (choice == '__new__') {
+      final name = await _askGroupName('새 문장 그룹');
+      if (name == null || name.isEmpty) return;
+      gid = await Store.addSentenceGroup(name, kGroupColors[groups.length % kGroupColors.length].value);
+    }
+    await Store.addSentencesToGroup(List<String>.from(_selectedIds), gid);
+    if (mounted) {
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('그룹에 담았어요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
+    }
+  }
+
+  Widget _sgChip(String label, bool on, VoidCallback onTap, {Color color = kBlue, VoidCallback? onLongPress}) =>
+    GestureDetector(onTap: onTap, onLongPress: onLongPress,
+      child: Container(
+        margin: const EdgeInsets.only(right: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: on ? color : color.withOpacity(0.1), borderRadius: BorderRadius.circular(16)),
+        child: Text(label, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+            color: on ? Colors.white : color))));
+
   Widget _buildSetup(List<SavedSentenceModel> sentences, {required bool fill}) {
     final ready = _readyCount(sentences);
-    final list = ListView.builder(itemCount: sentences.length,
+    final groups = Store.getSentenceGroups();
+    final assign = Store.sentenceGroupMap();
+    final q = _sgQuery.trim();
+    final shown = sentences.where((s) {
+      final gids = assign[s.id] ?? const <String>[];
+      if (_sgFilter == '__none__' && gids.isNotEmpty) return false;
+      if (_sgFilter.isNotEmpty && _sgFilter != '__none__' && !gids.contains(_sgFilter)) return false;
+      if (q.isNotEmpty && !s.text.contains(q)) return false;
+      return true;
+    }).toList();
+    final list = shown.isEmpty
+        ? const Center(child: Text('해당하는 문장이 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey)))
+        : ListView.builder(itemCount: shown.length,
             itemBuilder: (_, i) {
-              final s = sentences[i];
+              final s = shown[i];
               final order = _selectedIds.indexOf(s.id);
               final isSel = order >= 0;
+              final tags = groups.where((g) => (assign[s.id] ?? const <String>[]).contains(g['id'])).toList();
               return GestureDetector(
                 onTap: () => setState(() {
                   if (isSel) _selectedIds.remove(s.id); else _selectedIds.add(s.id);
@@ -5799,8 +6114,17 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
                           ? Text('${order + 1}', style: const TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w800))
                           : null)),
                     // 문장당 기본 최대 9줄, 10줄 이상이면 '더보기'
-                    Expanded(child: _ClampedText(text: s.text, maxLines: 9,
-                        style: const TextStyle(fontSize: 13, height: 1.5))),
+                    Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      _ClampedText(text: s.text, maxLines: 9,
+                          style: const TextStyle(fontSize: 13, height: 1.5)),
+                      if (tags.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4),
+                        child: Wrap(spacing: 4, runSpacing: 4, children: tags.map((g) => Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                          decoration: BoxDecoration(color: _sgColor(g).withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(8)),
+                          child: Text(g['name'] as String,
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: _sgColor(g))))).toList())),
+                    ])),
                   ])));
             });
     final startBtn = SizedBox(width: double.infinity,
@@ -5836,9 +6160,63 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
                   decoration: TextDecoration.underline))),
         ]),
         const SizedBox(height: 6),
+        // 문장 검색
+        TextField(
+          controller: _sgSearchCtrl,
+          onChanged: (v) => setState(() => _sgQuery = v),
+          decoration: InputDecoration(
+            hintText: '문장 검색', isDense: true,
+            prefixIcon: const Icon(Icons.search, size: 18),
+            suffixIcon: _sgQuery.isEmpty ? null : IconButton(
+              icon: const Icon(Icons.close, size: 16),
+              onPressed: () { _sgSearchCtrl.clear(); setState(() => _sgQuery = ''); }),
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+            focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
+                borderSide: const BorderSide(color: kBlue)))),
+        const SizedBox(height: 8),
+        // 그룹 칩 (길게 누르면 이름 바꾸기/삭제)
+        SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+          _sgChip('전체 ${sentences.length}', _sgFilter.isEmpty, () => setState(() => _sgFilter = '')),
+          ...groups.map((g) {
+            final cnt = sentences.where((s) => (assign[s.id] ?? const <String>[]).contains(g['id'])).length;
+            return _sgChip('${g['name']} $cnt', _sgFilter == g['id'],
+                () => setState(() => _sgFilter = g['id'] as String),
+                color: _sgColor(g), onLongPress: () => _sentenceGroupMenu(g));
+          }),
+          _sgChip('미분류', _sgFilter == '__none__', () => setState(() => _sgFilter = '__none__'),
+              color: Colors.grey.shade600),
+          _sgChip('+ 그룹', false, _createSentenceGroup, color: Colors.green.shade700),
+        ])),
+        const SizedBox(height: 6),
+        // 보이는 문장 전체 선택 / 선택한 문장 그룹에 담기
+        Row(children: [
+          if (shown.isNotEmpty)
+            GestureDetector(
+              onTap: () => setState(() {
+                for (final s in shown) { if (!_selectedIds.contains(s.id)) _selectedIds.add(s.id); }
+              }),
+              child: Text('보이는 ${shown.length}문장 모두 선택',
+                  style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700,
+                      decoration: TextDecoration.underline))),
+          const Spacer(),
+          if (_selectedIds.isNotEmpty)
+            GestureDetector(onTap: _assignSelectedToGroup,
+              child: _actionChip(Icons.folder_rounded, '선택 ${_selectedIds.length}개 그룹에 담기', kBlue)),
+          if (_selectedIds.isNotEmpty && _sgFilter.isNotEmpty && _sgFilter != '__none__') ...[
+            const SizedBox(width: 6),
+            GestureDetector(
+              onTap: () async {
+                await Store.removeSentencesFromGroup(List<String>.from(_selectedIds), _sgFilter);
+                if (mounted) setState(() {});
+              },
+              child: _actionChip(Icons.folder_off_rounded, '그룹에서 빼기', Colors.grey.shade600)),
+          ],
+        ]),
+        const SizedBox(height: 6),
         // 큰 화면: 남는 공간을 목록이 채우고(넘치면 목록 안에서 스크롤), 시작 버튼은 맨 아래 고정
         // 작은 화면: 목록은 작게, 화면 전체가 스크롤
-        if (fill) Expanded(child: list) else SizedBox(height: 160, child: list),
+        if (fill) Expanded(child: list) else SizedBox(height: 200, child: list),
         const SizedBox(height: 12),
       ] else if (fill) const Spacer(),
 
@@ -5916,6 +6294,12 @@ class _QuizScreenState extends State<QuizScreen> {
   // TTS 오류: 이번 테스트에서 표시한 문제들 / 마지막 '보면서 테스트' 라운드 여부
   List<dynamic> _ttsFlagged = [];
   bool _seeRound = false;
+
+  // 주춤 기록: 백스페이스 횟수 / TTS 재생이 끝난 시각 / 첫 글자를 친 시각
+  int _bsCount = 0;
+  DateTime? _ttsEndAt, _firstKeyAt;
+  int _qToken = 0;
+  final Set<String> _hzManual = {}; // 결과 화면에서 직접 '주춤'으로 추가한 약어
 
   @override
   void initState() {
@@ -6079,16 +6463,29 @@ class _QuizScreenState extends State<QuizScreen> {
       _started = true;
       _finished = false;
       _ttsPlayed = false;
+      _hzManual.clear();
       _answerCtrl.clear();
     });
+    _beginQuestionTrack();
     _playCurrentTts();
+  }
+
+  // 문제가 새로 나올 때마다 주춤 기록 초기화
+  void _beginQuestionTrack() {
+    _bsCount = 0;
+    _firstKeyAt = null;
+    _ttsEndAt = null;
+    _qToken++;
   }
 
   void _playCurrentTts() async {
     if (_currentIdx >= _questions.length) return;
     final q = _questions[_currentIdx];
     final text = _itemText(q);
+    final token = _qToken;
     await TtsController.instance.speak(text);
+    if (!mounted) return;
+    if (token == _qToken) _ttsEndAt ??= DateTime.now(); // 처음 재생이 끝난 시각만 기록
     setState(() => _ttsPlayed = true);
   }
 
@@ -6140,13 +6537,27 @@ class _QuizScreenState extends State<QuizScreen> {
     final userWords = userText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
     final wrongWords = _findWrong(userWords, correctWords);
 
+    // 주춤 판정 (약어만): 백스페이스 N회 이상, 또는 TTS 재생이 끝난 뒤 N초 넘게 입력을 시작하지 않음
+    // (텍스트를 보며 치는 보고 테스트는 시간 기준에서 제외)
+    final seeing = _seeRound || Store.isTtsError(correctText);
+    final bsHz = q is AbbreviationModel && _bsCount >= Store.hzBackspace();
+    final slowHz = q is AbbreviationModel && !seeing && _ttsEndAt != null &&
+        (_firstKeyAt ?? DateTime.now()).difference(_ttsEndAt!).inMilliseconds > Store.hzSecs() * 1000;
+    final hesitated = bsHz || slowHz;
+
     _results.add({
       'question': correctText,
       'userAnswer': userText,
       'correct': wrongWords.isEmpty,
       'wrong': wrongWords,
       'item': q,
+      'hesitated': hesitated,
+      'bs': _bsCount,
+      'slow': slowHz,
     });
+    if (q is AbbreviationModel) {
+      Store.hzOnResult(correctText, correct: wrongWords.isEmpty, hesitated: hesitated);
+    }
 
     // 이번 테스트에서 TTS 오류로 표시한 약어가 (중복 출제 등으로) 텍스트를 보며 이미 채점됐다면
     // 마지막 '보고 테스트' 라운드에서 다시 묻지 않는다
@@ -6181,6 +6592,7 @@ class _QuizScreenState extends State<QuizScreen> {
 
   // 현재 문제 소리 재생 + 입력창 포커스
   void _presentQuestion() {
+    _beginQuestionTrack();
     _playCurrentTts();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _inputFocusNode.requestFocus();
@@ -6228,18 +6640,137 @@ class _QuizScreenState extends State<QuizScreen> {
       _results = [];
       _finished = false;
       _ttsPlayed = false;
+      _hzManual.clear();
       _answerCtrl.clear();
     });
+    _beginQuestionTrack();
     _playCurrentTts();
   }
 
   void _retryAll() {
     setState(() {
+      _hzManual.clear();
       _started = false;
       _finished = false;
       _results = [];
       _answerCtrl.clear();
     });
+  }
+
+  // 주춤한 약어를 이번 주 그룹(예: 11월 2째주 주춤 약어)에 저장
+  Future<void> _saveHz(List<AbbreviationModel> items) async {
+    final name = Store.hzGroupName(Store.hzWeekStart(DateTime.now()));
+    final n = await Store.hzAddItems(items);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(n == 0 ? '이미 $name 그룹에 모두 들어 있어요' : '$name 그룹에 $n개 저장했어요'),
+        backgroundColor: kBlue, duration: const Duration(seconds: 2)));
+    setState(() {});
+  }
+
+  // 운 좋게 맞힌 약어를 직접 주춤으로 추가
+  Future<void> _pickManualHz(List<Map<String, dynamic>> candidates) async {
+    final picked = <String>{};
+    await showModalBottomSheet(
+      context: context, isScrollControlled: true, backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+        child: Padding(padding: const EdgeInsets.all(20), child: Column(
+          mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('맞혔지만 불안한 약어 추가',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+          const SizedBox(height: 4),
+          const Text('체크한 약어가 주춤한 약어 목록에 들어가요.',
+              style: TextStyle(fontSize: 11, color: Colors.grey)),
+          const SizedBox(height: 8),
+          Flexible(child: ListView(shrinkWrap: true, children: candidates.map((r) {
+            final t = r['question'] as String;
+            final on = picked.contains(t);
+            return InkWell(
+              onTap: () => setS(() { if (on) { picked.remove(t); } else { picked.add(t); } }),
+              child: Row(children: [
+                Checkbox(value: on, activeColor: kBlue, visualDensity: VisualDensity.compact,
+                    onChanged: (_) => setS(() { if (on) { picked.remove(t); } else { picked.add(t); } })),
+                Expanded(child: Text(t, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600))),
+              ]));
+          }).toList())),
+          const SizedBox(height: 10),
+          SizedBox(width: double.infinity, child: ElevatedButton(
+            onPressed: () => Navigator.pop(ctx),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+            child: Text(picked.isEmpty ? '닫기' : '${picked.length}개 추가'))),
+        ]))))));
+    if (picked.isNotEmpty && mounted) setState(() => _hzManual.addAll(picked));
+  }
+
+  // 공부방 설정 화면: 주춤 약어 그룹 목록 (테스트 / 졸업 약어 삭제)
+  Widget _hzGroupsSetup() {
+    final groups = Store.hzGroupsSorted();
+    if (groups.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.only(top: 16), padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFFFFE0B0))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Text('주춤 약어 그룹', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFFE65100))),
+          const Spacer(),
+          GestureDetector(
+            onTap: () => showHzHelp(context),
+            child: Icon(Icons.info_outline_rounded, size: 15, color: Colors.grey.shade400)),
+        ]),
+        const SizedBox(height: 8),
+        ...groups.map((e) {
+          final gid = e.key;
+          final g = Store.findGroup(gid);
+          final items = Store.hzGroupItems(gid);
+          final grads = Store.hzGraduates(gid);
+          final due = Store.hzIsDue(gid);
+          return Container(
+            margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(g?.name ?? '주춤 약어', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+              const SizedBox(height: 2),
+              Text('${items.length}개 · 졸업 가능 ${grads.length}개${due ? ' · 테스트할 시간이에요' : ''}',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              const SizedBox(height: 6),
+              Row(children: [
+                OutlinedButton(
+                  onPressed: items.isEmpty ? null : () { kQuizPreset.value = items; },
+                  style: OutlinedButton.styleFrom(foregroundColor: kBlue, side: const BorderSide(color: kBlue),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+                  child: const Text('그룹 테스트', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
+                const SizedBox(width: 8),
+                if (grads.isNotEmpty)
+                  TextButton(
+                    onPressed: due ? () => _hzGraduate(gid, grads) : null,
+                    child: Text(due ? '졸업 ${grads.length}개 삭제' : '졸업 ${grads.length}개 · 다음 주 월요일부터 삭제',
+                        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700))),
+              ]),
+            ]));
+        }),
+      ]));
+  }
+
+  Future<void> _hzGraduate(String gid, List<AbbreviationModel> grads) async {
+    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('졸업 약어 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+      content: Text('${Store.hzGoal()}회 연속 정답을 채운 ${grads.length}개 약어를 이 그룹에서 뺄까요?\n(약어 자체는 지워지지 않아요)'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        ElevatedButton(onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
+            child: const Text('삭제')),
+      ]));
+    if (ok != true) return;
+    await Store.hzRemoveFromGroup(gid, grads);
+    if (mounted) setState(() {});
   }
 
   Future<void> _saveWrongAsGroup(List<dynamic> wrongItems) async {
@@ -6636,6 +7167,7 @@ Widget _buildSetup() {
           label: Text('TTS 오류 약어 관리 (${Store.getTtsErrors().length}개)',
               style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
           style: TextButton.styleFrom(foregroundColor: const Color(0xFFE65100)))),
+        _hzGroupsSetup(),
       ]))));
   }
 
@@ -6722,19 +7254,31 @@ Widget _buildQuiz() {
                       style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: kBlueDark))),
                 ])),
               _lbl(showText ? '보이는 내용을 입력하세요' : '들은 내용을 입력하세요'),
-              TextField(
-                controller: _answerCtrl,
-                focusNode: _inputFocusNode,
-                maxLines: 1,
-                autofocus: true,
-                textInputAction: TextInputAction.done,
-                onSubmitted: (_) => _submit(),
-                decoration: InputDecoration(
-                  hintText: '답변 후 엔터...',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(color: kBlue))),
+              // 백스페이스는 막지 않고 횟수만 센다 (주춤 판정용)
+              Focus(
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent && _answerCtrl.text.isNotEmpty &&
+                      (event.logicalKey == LogicalKeyboardKey.backspace ||
+                       event.logicalKey == LogicalKeyboardKey.delete)) {
+                    _bsCount++;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: TextField(
+                  controller: _answerCtrl,
+                  focusNode: _inputFocusNode,
+                  maxLines: 1,
+                  autofocus: true,
+                  textInputAction: TextInputAction.done,
+                  onChanged: (_) { _firstKeyAt ??= DateTime.now(); },
+                  onSubmitted: (_) => _submit(),
+                  decoration: InputDecoration(
+                    hintText: '답변 후 엔터...',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                        borderSide: const BorderSide(color: kBlue))),
+                ),
               ),
               const SizedBox(height: 16),
               SizedBox(width: double.infinity, child: ElevatedButton(
@@ -6756,6 +7300,21 @@ Widget _buildQuiz() {
     final wrongResults = _results.where((r) => !(r['correct'] as bool)).toList();
     final wrongItems = wrongResults.map((r) => r['item']).toList();
     final wrongAbbrItems = wrongItems.whereType<AbbreviationModel>().toList();
+
+    // 주춤한 약어 (백스페이스/5초) + 직접 추가한 약어. 같은 약어는 한 번만.
+    final abbrResults = _results.where((r) => r['item'] is AbbreviationModel).toList();
+    final hzMap = <String, Map<String, dynamic>>{};
+    for (final r in abbrResults) {
+      final k = r['question'] as String;
+      if (r['hesitated'] == true || _hzManual.contains(k)) hzMap.putIfAbsent(k, () => r);
+    }
+    final hzList = hzMap.values.toList();
+    final seenCand = <String>{...hzMap.keys};
+    final hzCandidates = <Map<String, dynamic>>[];
+    for (final r in abbrResults) {
+      final k = r['question'] as String;
+      if (r['correct'] == true && seenCand.add(k)) hzCandidates.add(r);
+    }
 
     // 최근 7일간 역대 오답 기록 기준으로, 많이 틀린 항목(전체 텍스트) 순 정렬
     final sortedWrong = Store.getRecentWrongCounts(days: 7).entries.toList()
@@ -6843,6 +7402,56 @@ Widget _buildQuiz() {
           const SizedBox(height: 20),
         ],
 
+        // 주춤한 약어 (오답과 별도 목록)
+        if (abbrResults.isNotEmpty) ...[
+          Row(children: [
+            Text('주춤한 약어 (${hzList.length}개)',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.grey)),
+            const Spacer(),
+            if (hzCandidates.isNotEmpty) ...[
+              GestureDetector(
+                onTap: () => _pickManualHz(hzCandidates),
+                child: _actionChip(Icons.add_rounded, '직접 추가', kBlueSky)),
+              const SizedBox(width: 6),
+            ],
+            if (hzList.isNotEmpty)
+              GestureDetector(
+                onTap: () => _saveHz(hzList.map((r) => r['item'] as AbbreviationModel).toList()),
+                child: _actionChip(Icons.folder_rounded, '주춤 그룹 저장', const Color(0xFFFF9800))),
+            const SizedBox(width: 6),
+            // 티 나지 않는 작은 도움말 아이콘
+            GestureDetector(
+              onTap: () => showHzHelp(context),
+              child: Icon(Icons.info_outline_rounded, size: 15, color: Colors.grey.shade400)),
+          ]),
+          const SizedBox(height: 8),
+          if (hzList.isEmpty)
+            const Padding(padding: EdgeInsets.only(bottom: 8),
+              child: Text('주춤한 약어가 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey)))
+          else
+            ...hzList.map((r) {
+              final correct = r['correct'] as bool;
+              final reasons = <String>[];
+              if ((r['bs'] as int? ?? 0) >= Store.hzBackspace()) reasons.add('백스페이스 ${r['bs']}회');
+              if (r['slow'] == true) reasons.add('${Store.hzSecs()}초 넘김');
+              if (reasons.isEmpty) reasons.add('직접 추가');
+              return Container(
+                margin: const EdgeInsets.only(bottom: 6), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFFFE0B0))),
+                child: Row(children: [
+                  Expanded(child: SelectionArea(child: Text(r['question'] as String,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)))),
+                  Text(reasons.join(' · '), style: const TextStyle(fontSize: 10, color: Colors.grey)),
+                  const SizedBox(width: 6),
+                  Text(correct ? '정답' : '오답',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800,
+                          color: correct ? Colors.green : Colors.red)),
+                ]));
+            }),
+          const SizedBox(height: 20),
+        ],
+
         // 많이 틀린 항목 순위 (최근 7일, 역대 테스트 기록 기준)
         if (sortedWrong.isNotEmpty) ...[
           const Text('최근 7일 많이 틀린 약어·문장',
@@ -6863,6 +7472,104 @@ Widget _buildQuiz() {
         ],
       ]))));
   }
+}
+
+// ── 주춤 약어 도움말 / 기준 설정 / 리마인드 ─────────────────────────────
+Future<void> showHzHelp(BuildContext context) {
+  Widget h(String t) => Padding(padding: const EdgeInsets.only(top: 12, bottom: 4),
+      child: Text(t, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)));
+  Widget b(String t) => Padding(padding: const EdgeInsets.only(bottom: 3),
+      child: Text(t, style: const TextStyle(fontSize: 12, height: 1.5)));
+  return showDialog(context: context, builder: (ctx) => AlertDialog(
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    title: const Text('주춤한 약어란?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+    content: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      h('주춤한 약어'),
+      b('· 백스페이스를 ${Store.hzBackspace()}회 이상 쓴 약어'),
+      b('· TTS가 끝난 뒤 ${Store.hzSecs()}초 안에 입력을 시작하지 않은 약어 (보고 테스트는 시간 기준에서 제외)'),
+      b('· 결과 화면에서 오답과 따로 모아 보여주고, 맞혔지만 불안한 약어는 직접 추가할 수 있어요.'),
+      h('주춤 약어 그룹'),
+      b('· 주(월~일) 단위로 "11월 1째주 주춤 약어"처럼 묶여요.'),
+      b('· 그룹 테스트는 만든 당일부터 할 수 있어요.'),
+      b('· 그 주의 다음 주 월요일부터 앱을 켤 때 테스트하라고 알려드려요.'),
+      h('정답 횟수'),
+      b('· 주춤 없이 정답: +1 (하루 최대 +${Store.hzDayCap()})'),
+      b('· 틀리면 0, 주춤하면 절반 (홀수는 내림, 예: 7 → 3)'),
+      b('· ${Store.hzGoal()}회가 되면 다음 주 월요일 이후부터 그룹에서 삭제할 수 있어요.'),
+      b('· 주춤한 그 테스트 자체는 횟수에 넣지 않고, 그 뒤 테스트부터 세요.'),
+    ])),
+    actions: [
+      TextButton(onPressed: () { Navigator.pop(ctx); showHzSettings(context); },
+          child: const Text('기준 바꾸기')),
+      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기')),
+    ]));
+}
+
+Future<void> showHzSettings(BuildContext context) {
+  return showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+    Widget row(String label, String key, int value, int min, int max, String unit) => Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(children: [
+        Expanded(child: Text(label, style: const TextStyle(fontSize: 13))),
+        IconButton(icon: const Icon(Icons.remove_circle_outline, size: 20),
+          onPressed: value <= min ? null : () async { await Store.setHzCfg(key, value - 1); setS(() {}); }),
+        SizedBox(width: 44, child: Center(child: Text('$value$unit',
+            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)))),
+        IconButton(icon: const Icon(Icons.add_circle_outline, size: 20),
+          onPressed: value >= max ? null : () async { await Store.setHzCfg(key, value + 1); setS(() {}); }),
+      ]));
+    return AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('주춤 기준 바꾸기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+      content: Column(mainAxisSize: MainAxisSize.min, children: [
+        row('백스페이스 횟수', '_hz_bs', Store.hzBackspace(), 1, 10, '회'),
+        row('입력 시작 제한', '_hz_secs', Store.hzSecs(), 2, 30, '초'),
+        row('졸업 정답 횟수', '_hz_goal', Store.hzGoal(), 3, 30, '회'),
+        row('하루 인정 한도', '_hz_cap', Store.hzDayCap(), 1, 10, '회'),
+      ]),
+      actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기'))]);
+  }));
+}
+
+// 다음 주 월요일부터: 지난주 주춤 약어 그룹 테스트 알림
+Future<void> showHzDueDialog(BuildContext context, List<String> gids, String todayKey) {
+  return showDialog(context: context, builder: (ctx) => AlertDialog(
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+    title: const Row(children: [
+      Icon(Icons.notifications_rounded, size: 18, color: Color(0xFFFF9800)),
+      SizedBox(width: 6),
+      Text('주춤 약어 그룹 테스트', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
+    ]),
+    content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start, children: gids.map((gid) {
+        final g = Store.findGroup(gid);
+        final items = Store.hzGroupItems(gid);
+        final grads = Store.hzGraduates(gid);
+        return Container(
+          margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(10)),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(g?.name ?? '주춤 약어', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)),
+            Text('${items.length}개 · 졸업 가능 ${grads.length}개',
+                style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            const SizedBox(height: 6),
+            ElevatedButton(
+              onPressed: items.isEmpty ? null : () {
+                kQuizPreset.value = items;
+                kTabRequest.value = 5;
+                Navigator.pop(ctx);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
+              child: const Text('테스트 하러 가기', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700))),
+          ]));
+      }).toList())),
+    actions: [
+      TextButton(onPressed: () { Hive.box('settings').put('_hz_dismissed_$todayKey', true); Navigator.pop(ctx); },
+          child: const Text('오늘 다시 보지 않음', style: TextStyle(color: Colors.grey))),
+      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('닫기')),
+    ]));
 }
 
 class _ModeChip extends StatelessWidget {
