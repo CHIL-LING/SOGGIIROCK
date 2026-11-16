@@ -1112,12 +1112,13 @@ void _init() async {
   }
 
   // text: 전체 문장, startIndex: 시작할 단어 인덱스 (기본 0 = 처음부터)
-  Future<void> speak(String text, {int startIndex = 0}) async {
+  // 끝까지 정상 재생됐으면 true, 중간에 끊기거나 다른 재생이 시작되면 false
+  Future<bool> speak(String text, {int startIndex = 0}) async {
     await stop();
     final myToken = ++_playToken;
     _fullText = text;
     _words = _splitWithOffsets(text);
-    if (_words.isEmpty) return;
+    if (_words.isEmpty) return false;
 
     _currentIndex = startIndex.clamp(0, _words.length - 1);
     _playing = true;
@@ -1131,7 +1132,7 @@ void _init() async {
     await _tts.setPitch(pitch);
 
     for (int i = _currentIndex; i < _words.length; i++) {
-      if (myToken != _playToken) return;
+      if (myToken != _playToken) return false;
 
       _currentIndex = i;
       final start = _words[i].key;
@@ -1147,7 +1148,7 @@ void _init() async {
       await _tts.speak(word);
       await completer.future;
 
-      if (myToken != _playToken) return;
+      if (myToken != _playToken) return false;
 
       if (i < _words.length - 1 && pauseMs > 0) {
         await Future.delayed(Duration(milliseconds: pauseMs.round()));
@@ -1159,7 +1160,9 @@ void _init() async {
       _playing = false; _wordStart = -1; _wordEnd = -1;
       _stopwatch.stop();
       notifyListeners();
+      return true;
     }
+    return false;
   }
 
   // 특정 글자 오프셋이 속한 단어부터 재생 (텍스트 탭 시 사용)
@@ -4686,68 +4689,8 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
           body: SafeArea(child: Column(children: [
             Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  const Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    GestureDetector(
-                      onTap: () async { await Store.setSentenceNewestFirst(!newest); if (mounted) setState(() {}); },
-                      child: _actionChip(Icons.swap_vert_rounded, newest ? '최신순' : '오래된순', kBlue)),
-                    if (!_selectMode) ...[
-                      const SizedBox(width: 8),
-                      GestureDetector(onTap: _toggleSelectMode, child: _iconToolBtn(Icons.checklist_rounded)),
-                    ],
-                  ]),
-                ]),
-                if (_selectMode) ...[
-                  const SizedBox(height: 10),
-                  Wrap(spacing: 6, runSpacing: 6, children: [
-                    if (_selected.length == 1)
-                      GestureDetector(onTap: () => _editSelected(context, sentences),
-                        child: _actionChip(Icons.edit_rounded, '수정', kBlueSky)),
-                    GestureDetector(
-                      onTap: _selected.isEmpty ? null : () async {
-                        final ok = await assignSentencesToGroupDialog(context, _selected.toList());
-                        if (ok && mounted) {
-                          _exitSelectMode();
-                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                              content: Text('그룹에 담았어요'), backgroundColor: kBlue,
-                              duration: Duration(seconds: 2)));
-                        }
-                      },
-                      child: _actionChip(Icons.folder_rounded, '그룹에 담기', kBlue)),
-                    if (inGroupFilter)
-                      GestureDetector(
-                        onTap: _selected.isEmpty ? null : () async {
-                          await Store.removeSentencesFromGroup(_selected.toList(), _sgFilter);
-                          if (mounted) _exitSelectMode();
-                        },
-                        child: _actionChip(Icons.folder_off_rounded, '그룹에서 빼기', Colors.grey)),
-                    GestureDetector(onTap: () => _bulkRemind(context, sentences),
-                      child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
-                    GestureDetector(onTap: () => _bulkCopy(sentences),
-                      child: _actionChip(Icons.copy, '복사', kBlueSky)),
-                    GestureDetector(onTap: () => _bulkCopyForAI(sentences),
-                      child: _actionChip(Icons.auto_awesome_rounded, 'AI 복사', kPurple)),
-                    GestureDetector(onTap: () => _bulkDelete(context, sentences),
-                      child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
-                    GestureDetector(onTap: _toggleSelectMode,
-                      child: _actionChip(Icons.close, '취소', Colors.grey)),
-                  ]),
-                ],
+                const Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
               ])),
-            if (_selectMode)
-              Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Row(children: [
-                  Text('${_selected.length}개 선택됨', style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
-                  const SizedBox(width: 12),
-                  GestureDetector(
-                    onTap: () => setState(() {
-                      if (_selected.length == sentences.length) _selected.clear();
-                      else _selected.addAll(sentences.map((s) => s.id));
-                    }),
-                    child: Text(_selected.length == sentences.length ? '전체 해제' : '전체 선택',
-                        style: const TextStyle(fontSize: 12, color: Colors.grey))),
-                ])),
             Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Column(children: [
               Focus(onKeyEvent: (node, event) {
                 if (event is KeyDownEvent &&
@@ -4786,6 +4729,66 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                         borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10),
                         borderSide: const BorderSide(color: kBlue)))),
+                const SizedBox(height: 8),
+                // 정렬 / 선택 버튼 (검색창 아래)
+                Row(children: [
+                  GestureDetector(
+                    onTap: () async { await Store.setSentenceNewestFirst(!newest); if (mounted) setState(() {}); },
+                    child: _actionChip(Icons.swap_vert_rounded, newest ? '최신순' : '오래된순', kBlue)),
+                  const SizedBox(width: 8),
+                  if (!_selectMode)
+                    GestureDetector(onTap: _toggleSelectMode,
+                      child: _actionChip(Icons.checklist_rounded, '선택', kBlue)),
+                ]),
+                if (_selectMode) ...[
+                  const SizedBox(height: 10),
+                  Wrap(spacing: 6, runSpacing: 6, children: [
+                    if (_selected.length == 1)
+                      GestureDetector(onTap: () => _editSelected(context, sentences),
+                        child: _actionChip(Icons.edit_rounded, '수정', kBlueSky)),
+                    GestureDetector(
+                      onTap: _selected.isEmpty ? null : () async {
+                        final ok = await assignSentencesToGroupDialog(context, _selected.toList());
+                        if (ok && mounted) {
+                          _exitSelectMode();
+                          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                              content: Text('그룹에 담았어요'), backgroundColor: kBlue,
+                              duration: Duration(seconds: 2)));
+                        }
+                      },
+                      child: _actionChip(Icons.folder_rounded, '그룹에 담기', kBlue)),
+                    if (inGroupFilter)
+                      GestureDetector(
+                        onTap: _selected.isEmpty ? null : () async {
+                          await Store.removeSentencesFromGroup(_selected.toList(), _sgFilter);
+                          if (mounted) _exitSelectMode();
+                        },
+                        child: _actionChip(Icons.folder_off_rounded, '그룹에서 빼기', Colors.grey)),
+                    GestureDetector(onTap: () => _bulkRemind(context, sentences),
+                      child: _actionChip(Icons.notifications_rounded, '리마인드', kBlue)),
+                    GestureDetector(onTap: () => _bulkCopy(sentences),
+                      child: _actionChip(Icons.copy, '복사', kBlueSky)),
+                    GestureDetector(onTap: () => _bulkCopyForAI(sentences),
+                      child: _actionChip(Icons.auto_awesome_rounded, 'AI 복사', kPurple)),
+                    GestureDetector(onTap: () => _bulkDelete(context, sentences),
+                      child: _actionChip(Icons.delete_rounded, '삭제', Colors.red)),
+                    GestureDetector(onTap: _toggleSelectMode,
+                      child: _actionChip(Icons.close, '취소', Colors.grey)),
+                  ]),
+                ],
+                if (_selectMode)
+                  Padding(padding: const EdgeInsets.only(top: 8),
+                    child: Row(children: [
+                      Text('${_selected.length}개 선택됨', style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
+                      const SizedBox(width: 12),
+                      GestureDetector(
+                        onTap: () => setState(() {
+                          if (_selected.length == sentences.length) _selected.clear();
+                          else _selected.addAll(sentences.map((s) => s.id));
+                        }),
+                        child: Text(_selected.length == sentences.length ? '전체 해제' : '전체 선택',
+                            style: const TextStyle(fontSize: 12, color: Colors.grey))),
+                    ])),
                 const SizedBox(height: 8),
                 SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
                   sgChip('전체 ${all.length}', _sgFilter.isEmpty, () => setState(() => _sgFilter = '')),
@@ -6203,26 +6206,36 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
               color: Colors.grey.shade600),
         ])),
         const SizedBox(height: 6),
-        // 보이는 문장 전체 선택 / 선택한 문장만 보기 / 선택 전체 취소
-        Wrap(spacing: 8, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+        // 다른 탭과 같은 방식: N개 선택됨 + 전체 선택 / 전체 해제
+        Row(children: [
+          Text('${_selectedIds.length}개 선택됨',
+              style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w600)),
+          const SizedBox(width: 12),
           if (shown.isNotEmpty)
             GestureDetector(
               onTap: () => setState(() {
-                for (final s in shown) { if (!_selectedIds.contains(s.id)) _selectedIds.add(s.id); }
+                final shownIds = shown.map((s) => s.id).toSet();
+                if (shownIds.every(_selectedIds.contains)) {
+                  _selectedIds.removeWhere(shownIds.contains);
+                } else {
+                  for (final s in shown) { if (!_selectedIds.contains(s.id)) _selectedIds.add(s.id); }
+                }
+                if (_selectedIds.isEmpty) _onlySelected = false;
               }),
-              child: Text('보이는 ${shown.length}문장 모두 선택',
-                  style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700,
-                      decoration: TextDecoration.underline))),
-          if (_selectedIds.isNotEmpty)
-            GestureDetector(
-              onTap: () => setState(() => _onlySelected = !_onlySelected),
-              child: _actionChip(Icons.checklist_rounded,
-                  onlySel ? '전체 문장 보기' : '선택됨 ${_selectedIds.length}개만 보기', kBlue)),
-          if (_selectedIds.isNotEmpty)
-            GestureDetector(
-              onTap: () => setState(() { _selectedIds.clear(); _onlySelected = false; }),
-              child: _actionChip(Icons.close_rounded, '선택 전체 취소', Colors.red)),
+              child: Text(shown.every((s) => _selectedIds.contains(s.id)) ? '전체 해제' : '전체 선택',
+                  style: const TextStyle(fontSize: 12, color: Colors.grey))),
         ]),
+        if (_selectedIds.isNotEmpty)
+          Padding(padding: const EdgeInsets.only(top: 6),
+            child: Wrap(spacing: 8, runSpacing: 6, children: [
+              GestureDetector(
+                onTap: () => setState(() => _onlySelected = !_onlySelected),
+                child: _actionChip(Icons.checklist_rounded,
+                    onlySel ? '전체 문장 보기' : '선택된 ${_selectedIds.length}개만 보기', kBlue)),
+              GestureDetector(
+                onTap: () => setState(() { _selectedIds.clear(); _onlySelected = false; }),
+                child: _actionChip(Icons.close_rounded, '선택 전체 취소', Colors.red)),
+            ])),
         const SizedBox(height: 6),
         // 큰 화면: 남는 공간을 목록이 채우고(넘치면 목록 안에서 스크롤), 시작 버튼은 맨 아래 고정
         // 작은 화면: 목록은 작게, 화면 전체가 스크롤
@@ -6308,6 +6321,7 @@ class _QuizScreenState extends State<QuizScreen> {
 
   // 주춤 기록: 백스페이스 횟수 / TTS 재생이 끝난 시각 / 첫 글자를 친 시각
   int _bsCount = 0;
+  bool _rShiftAlone = false; // 오른쪽 Shift를 누른 뒤 다른 입력 없이 뗐는지
   DateTime? _ttsEndAt, _firstKeyAt;
   int _qToken = 0;
   final Set<String> _hzManual = {}; // 결과 화면에서 직접 '주춤'으로 추가한 약어
@@ -6495,9 +6509,11 @@ class _QuizScreenState extends State<QuizScreen> {
     final q = _questions[_currentIdx];
     final text = _itemText(q);
     final token = _qToken;
-    await TtsController.instance.speak(text);
+    _ttsEndAt = null; // 재생 중에는 5초를 재지 않는다 (다시 듣기를 눌러도 새로 잼)
+    final finished = await TtsController.instance.speak(text);
     if (!mounted) return;
-    if (token == _qToken) _ttsEndAt ??= DateTime.now(); // 처음 재생이 끝난 시각만 기록
+    // 끝까지 정상 재생됐을 때만 그 시각부터 5초를 잰다 (끊기거나 안 들렸으면 재지 않음)
+    if (finished && token == _qToken) _ttsEndAt = DateTime.now();
     setState(() => _ttsPlayed = true);
   }
 
@@ -7177,11 +7193,17 @@ Widget _buildQuiz() {
         focusNode: _keyboardFocusNode,
         autofocus: true,
         onKeyEvent: (event) {
-          if (event is KeyDownEvent && (
-              event.logicalKey == LogicalKeyboardKey.shift ||
-              event.logicalKey == LogicalKeyboardKey.shiftLeft ||
-              event.logicalKey == LogicalKeyboardKey.shiftRight)) {
-            _playCurrentTts();
+          // 다시 듣기: 오른쪽 Shift를 혼자 눌렀다 뗄 때만. Shift를 누른 채 다른 키를 치면(쌍자음) 재생 안 함.
+          // 왼쪽 Shift는 다시 듣기와 상관없음.
+          if (event.logicalKey == LogicalKeyboardKey.shiftRight) {
+            if (event is KeyDownEvent) {
+              _rShiftAlone = true;
+            } else if (event is KeyUpEvent && _rShiftAlone) {
+              _rShiftAlone = false;
+              _playCurrentTts();
+            }
+          } else if (event is KeyDownEvent) {
+            _rShiftAlone = false;
           }
         },
         child: Column(children: [
@@ -7212,7 +7234,7 @@ Widget _buildQuiz() {
                       color: tts.playing ? Colors.white : kBlue, size: 36)))),
               const SizedBox(height: 6),
               Center(child: Text(
-                tts.playing ? '읽는 중... (Shift로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (Shift)' : '눌러서 듣기'),
+                tts.playing ? '읽는 중... (오른쪽 Shift로 다시 듣기)' : (_ttsPlayed ? '다시 듣기 (오른쪽 Shift)' : '눌러서 듣기'),
                 style: TextStyle(fontSize: 12, color: tts.playing ? kBlue : Colors.grey))),
               if (!_seeRound && !showText) ...[
                 const SizedBox(height: 8),
@@ -7265,7 +7287,10 @@ Widget _buildQuiz() {
                   maxLines: 1,
                   autofocus: true,
                   textInputAction: TextInputAction.done,
-                  onChanged: (_) { _firstKeyAt ??= DateTime.now(); },
+                  onChanged: (_) {
+                    _firstKeyAt ??= DateTime.now();
+                    _rShiftAlone = false; // 글자를 치는 중이면 Shift는 입력용 (다시 듣기 아님)
+                  },
                   onSubmitted: (_) => _submit(),
                   decoration: InputDecoration(
                     hintText: '답변 후 엔터...',
