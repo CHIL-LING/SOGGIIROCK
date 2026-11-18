@@ -826,9 +826,13 @@ class StudyTimer extends ChangeNotifier {
   static StudyTimer get instance => _instance;
   StudyTimer._();
   Timer? _timer;
-  int _seconds = 0;
+  int _ms = 0;                 // 이번 타이머에서 쌓인 시간(ms)
+  int _lastTickMs = 0, _lastSaveMs = 0;
+  int _baseSec = 0;            // 이번 타이머를 시작할 때 그날 기록에 이미 있던 공부시간(초)
+  String _runKey = '';         // 이번 타이머가 저장할 날짜
   bool _running = false;
   bool get running => _running;
+  int get _seconds => _ms ~/ 1000;
   int get hours => _seconds ~/ 3600;
   int get minutes => (_seconds % 3600) ~/ 60;
   String get display {
@@ -836,25 +840,48 @@ class StudyTimer extends ChangeNotifier {
     if (h > 0) return '${h.toString().padLeft(2,'0')}:${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
     return '${m.toString().padLeft(2,'0')}:${s.toString().padLeft(2,'0')}';
   }
-  void start() {
-    if (_running) return;
-    _running = true;
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) { _seconds++; notifyListeners(); });
+  // 지난 확인 시각 이후 흐른 시간을 더한다. 다른 탭을 보느라 타이머가 느리게 돌아도 실제 시간으로 계산하고,
+  // 컴퓨터가 잠들었다 깬 것처럼 2분을 넘게 비면 그 시간은 세지 않는다.
+  int _accumulate() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final gap = now - _lastTickMs;
+    _lastTickMs = now;
+    if (gap > 0 && gap <= 120000) _ms += gap;
+    return now;
+  }
+  void _tick() {
+    final now = _accumulate();
+    if (now - _lastSaveMs >= 15000) { _lastSaveMs = now; saveToRecord(); } // 종료를 안 눌러도 15초마다 저장
     notifyListeners();
   }
-  void pause() { _running = false; _timer?.cancel(); notifyListeners(); }
-  void reset() { _running = false; _timer?.cancel(); _seconds = 0; notifyListeners(); }
+  void start() {
+    if (_running) return;
+    if (_ms == 0) {
+      // 새로 시작: 저장할 날짜와, 그날 기록에 이미 있던 시간을 잡아 둠 (그 위에 이어서 더함)
+      _runKey = todayKey;
+      final ex = Store.getRecord(_runKey);
+      _baseSec = (ex?.studyHours ?? 0) * 3600 + (ex?.studyMinutes ?? 0) * 60;
+    }
+    _running = true;
+    _lastTickMs = DateTime.now().millisecondsSinceEpoch;
+    _lastSaveMs = _lastTickMs;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
+    notifyListeners();
+  }
+  void pause() { if (_running) _accumulate(); _running = false; _timer?.cancel(); notifyListeners(); }
+  void reset() { _running = false; _timer?.cancel(); _ms = 0; _baseSec = 0; notifyListeners(); }
   String get todayKey {
     final now = DateTime.now();
     final base = now.hour < 5 ? now.subtract(const Duration(days: 1)) : now;
     return _ymd(base);
   }
   Future<void> saveToRecord() async {
-    if (_seconds == 0) return;
-    final key = todayKey;
+    if (_ms < 1000) return;
+    final key = _runKey.isEmpty ? todayKey : _runKey;
     final ex = Store.getRecord(key);
+    final totalMin = (_baseSec + _seconds) ~/ 60;
     await Store.saveRecord(StudyRecordModel(
-      date: key, studyHours: hours, studyMinutes: minutes,
+      date: key, studyHours: totalMin ~/ 60, studyMinutes: totalMin % 60,
       speechChars: ex?.speechChars, essayChars: ex?.essayChars,
       wpm: ex?.wpm, memo: ex?.memo ?? ''));
   }
@@ -874,15 +901,30 @@ String typingSourceLabel(String src) => src == kSrcSprint ? '스프린트' : '�
 class TypingSession {
   final String id, date, source;
   final int startMs, endMs, activeMs, chars;
+  // 스프린트 채점 결과 (연습장 기록이나 예전 기록에는 없음)
+  final int? tasu, oja, chum, tal, done, total;
+  final double? accuracy;
+  final bool? stopped;
   const TypingSession({required this.id, required this.date, required this.startMs,
-    required this.endMs, required this.activeMs, required this.chars, this.source = kSrcPad});
+    required this.endMs, required this.activeMs, required this.chars, this.source = kSrcPad,
+    this.tasu, this.accuracy, this.oja, this.chum, this.tal, this.done, this.total, this.stopped});
   Map<String, dynamic> toMap() => {'id': id, 'date': date, 'startMs': startMs,
-    'endMs': endMs, 'activeMs': activeMs, 'chars': chars, 'source': source};
+    'endMs': endMs, 'activeMs': activeMs, 'chars': chars, 'source': source,
+    if (tasu != null) ...{'tasu': tasu, 'accuracy': accuracy, 'oja': oja, 'chum': chum, 'tal': tal,
+      'done': done, 'total': total, 'stopped': stopped}};
   factory TypingSession.fromMap(Map m) => TypingSession(
     id: m['id'] as String, date: m['date'] as String,
     startMs: (m['startMs'] as num).toInt(), endMs: (m['endMs'] as num).toInt(),
     activeMs: (m['activeMs'] as num).toInt(), chars: ((m['chars'] as num?) ?? 0).toInt(),
-    source: (m['source'] as String?) ?? kSrcPad);
+    source: (m['source'] as String?) ?? kSrcPad,
+    tasu: (m['tasu'] as num?)?.toInt(), accuracy: (m['accuracy'] as num?)?.toDouble(),
+    oja: (m['oja'] as num?)?.toInt(), chum: (m['chum'] as num?)?.toInt(), tal: (m['tal'] as num?)?.toInt(),
+    done: (m['done'] as num?)?.toInt(), total: (m['total'] as num?)?.toInt(),
+    stopped: m['stopped'] as bool?);
+  // 기록 목록에 붙여 보여줄 채점 결과 한 줄
+  String? get resultLine => tasu == null ? null
+      : '문장 ${done ?? 0}/${total ?? 0} · $tasu타수 · 정확도 ${(accuracy ?? 0).toStringAsFixed(2)}% · '
+        '오자 ${oja ?? 0} 첨자 ${chum ?? 0} 탈자 ${tal ?? 0}${stopped == true ? ' (중단)' : ''}';
 }
 
 // 새벽 5시 이전은 전날로 취급 (기존 공부 기록과 같은 기준)
@@ -939,6 +981,37 @@ class TypingStore {
   static List<TypingSession> forDate(String date) => all().where((s) => s.date == date).toList();
   static Set<String> dates() => all().map((s) => s.date).toSet();
   static Future<void> delete(String id) => Hive.box('typingSessions').delete(id);
+
+  // 저장된 세션에 스프린트 채점 결과를 붙임
+  static Future<void> attachResult(String id, Map<String, dynamic> r) async {
+    final b = Hive.box('typingSessions');
+    final v = b.get(id);
+    if (v is! Map) return;
+    final m = Map<String, dynamic>.from(v)..addAll(r);
+    await b.put(id, m);
+  }
+  // 그날 스프린트 타수들 (0타수는 제외)
+  static List<int> tasusOf(String date) =>
+      forDate(date).map((s) => s.tasu ?? 0).where((t) => t > 0).toList();
+
+  // 홈 기록의 '타수' 칸에 그날 최고타를 자동으로 넣는다.
+  // 직접 적어 둔 값(자동으로 넣은 값이 아닌 것)은 건드리지 않는다.
+  static Future<void> updateAutoWpm(String date) async {
+    final t = tasusOf(date);
+    if (t.isEmpty) return;
+    final best = t.reduce(math.max);
+    final box = Hive.box('settings');
+    final key = '_auto_wpm_$date';
+    final lastAuto = box.get(key) as int?;
+    final ex = Store.getRecord(date);
+    if (ex?.wpm != null && ex!.wpm != lastAuto) return;
+    if (ex?.wpm != best) {
+      await Store.saveRecord(StudyRecordModel(
+        date: date, studyHours: ex?.studyHours, studyMinutes: ex?.studyMinutes,
+        speechChars: ex?.speechChars, essayChars: ex?.essayChars, wpm: best, memo: ex?.memo ?? ''));
+    }
+    await box.put(key, best);
+  }
 }
 
 class TypingTracker extends ChangeNotifier with WidgetsBindingObserver {
@@ -2048,7 +2121,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   const Icon(Icons.timer_rounded, color: kBlueDark, size: 26),
                   const SizedBox(width: 10),
                   Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    const Text('오늘 공부 시간', style: TextStyle(fontSize: 11, color: kBlueDark)),
+                    Text(timer.running ? '오늘 공부 시간 · 자동 저장 중' : '오늘 공부 시간', style: const TextStyle(fontSize: 11, color: kBlueDark)),
                     Text(timer.display, style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: kBlueDark, letterSpacing: 2)),
                   ])),
                   Row(children: [
@@ -2056,7 +2129,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       onTap: () async { if (timer.running) { timer.pause(); await timer.saveToRecord(); } else { timer.start(); } }),
                     const SizedBox(width: 8),
                     _TimerBtn(icon: Icons.stop_rounded,
-                      onTap: () async { await timer.saveToRecord(); timer.reset(); }),
+                      onTap: () async { timer.pause(); await timer.saveToRecord(); timer.reset(); }),
                   ]),
                 ]))),
             const SizedBox(height: 10),
@@ -2303,6 +2376,7 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
       final total = sessions.fold<int>(0, (a, s) => a + s.activeMs) + lives.fold<int>(0, (a, t) => a + t.activeMs);
       final count = sessions.length + lives.length;
       final isToday = widget.dateKey == widget.todayKey;
+      final tasus = TypingStore.tasusOf(widget.dateKey);
       const textColor = Color(0xFF3E566B);
       return Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
         child: Container(width: double.infinity, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -2325,6 +2399,10 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
                     Icon(_open ? Icons.expand_less_rounded : Icons.expand_more_rounded, size: 18, color: textColor),
                   ])),
             ]),
+            if (tasus.isNotEmpty)
+              Padding(padding: const EdgeInsets.only(top: 6),
+                child: Text('스프린트 최고 ${tasus.reduce(math.max)}타 · 최저 ${tasus.reduce(math.min)}타  (${tasus.length}회)',
+                    style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700))),
             if (_open && count > 0) ...[
               const SizedBox(height: 8),
               for (final tr in lives)
@@ -2333,7 +2411,8 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
                       style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
               ...sessions.reversed.map((s) => Padding(padding: const EdgeInsets.only(bottom: 6),
                 child: Row(children: [
-                  Expanded(child: SelectionArea(child: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)}  ·  ${formatTypingLong(s.activeMs)}  ·  ${s.chars}자  (${typingSourceLabel(s.source)})',
+                  Expanded(child: SelectionArea(child: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)}  ·  ${formatTypingLong(s.activeMs)}  ·  ${s.chars}자  (${typingSourceLabel(s.source)})'
+                      '${s.resultLine != null ? '\n${s.resultLine}' : ''}',
                       style: const TextStyle(fontSize: 12, color: textColor)))),
                   GestureDetector(onTap: () => _confirmDelete(context, s),
                     child: const Padding(padding: EdgeInsets.only(left: 8),
@@ -5618,6 +5697,14 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       _resultShownAt = DateTime.now();
     });
     final sess = await TypingTracker.sprint.finish(); // 순공시간(스프린트)으로 저장
+    if (sess != null) {
+      // 채점 결과도 같은 기록에 붙이고, 홈 기록의 타수 칸은 그날 최고타로 자동 기록
+      await TypingStore.attachResult(sess.id, {
+        'tasu': _tasu.round(), 'accuracy': _accuracy,
+        'oja': _sumOja, 'chum': _sumChum, 'tal': _sumTal,
+        'done': _doneCount, 'total': _queue.length, 'stopped': stopped});
+      await TypingStore.updateAutoWpm(sess.date);
+    }
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(sess == null ? '저장할 순공시간이 없어요' : '순공시간 ${formatTypingLong(sess.activeMs)} 저장됨 (스프린트)'),
@@ -5864,31 +5951,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     _sentenceScroll.jumpTo((pos.pixels + diff * k).clamp(0.0, pos.maxScrollExtent).toDouble());
   }
 
-  // ── 홈 기록으로 추가 ──
   String _fmtSec(int sec) => sec >= 60 ? '${sec ~/ 60}분 ${sec % 60}초' : '$sec초';
-
-  Future<void> _saveToHome() async {
-    if (_savedToHome || !_finished) return;
-    _savedToHome = true;
-    final now = DateTime.now();
-    final key = _dateKeyFromMs(now.millisecondsSinceEpoch);
-    final ex = Store.getRecord(key);
-    final hm = '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-    final line = '[스프린트 $hm] 문장 $_doneCount/${_queue.length} · ${_tasu.round()}타수 · '
-        '정확도 ${_accuracy.toStringAsFixed(2)}% · 오자 $_sumOja 첨자 $_sumChum 탈자 $_sumTal · ${_fmtSec(_elapsedSec)}'
-        '${_stoppedEarly ? ' (중단)' : ''}';
-    final oldMemo = ex?.memo ?? '';
-    await Store.saveRecord(StudyRecordModel(
-      date: key,
-      studyHours: ex?.studyHours, studyMinutes: ex?.studyMinutes,
-      speechChars: ex?.speechChars, essayChars: ex?.essayChars,
-      wpm: ex?.wpm ?? (_tasu > 0 ? _tasu.round() : null), // 이미 적어 둔 타수가 있으면 그대로 둠
-      memo: oldMemo.isEmpty ? line : '$oldMemo\n$line'));
-    if (!mounted) return;
-    setState(() {});
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-      content: Text('홈 기록에 추가했어요'), backgroundColor: kBlue, duration: Duration(seconds: 2)));
-  }
 
   // 쿼티 기준 타수 계산 (자모 분해)
   int _countTasu(String text) {
@@ -6141,17 +6204,6 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   Widget _buildResult() => Focus(
     focusNode: _resultFocus,
     autofocus: true,
-    onKeyEvent: (node, event) {
-      if (event is KeyDownEvent &&
-          (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter)) {
-        // 결과 화면이 막 떴을 때 같은 Enter가 또 들어와도 바로 저장되지 않게 잠깐 무시
-        final shown = _resultShownAt;
-        if (shown != null && DateTime.now().difference(shown).inMilliseconds < 600) return KeyEventResult.handled;
-        _saveToHome();
-        return KeyEventResult.handled;
-      }
-      return KeyEventResult.ignored;
-    },
     child: Container(width: double.infinity, padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
           color: _stoppedEarly ? const Color(0xFFFFF4E5) : const Color(0xFFE8F5E9),
@@ -6180,14 +6232,11 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
         ]),
         const SizedBox(height: 8),
         _resultItem('순공시간', formatTypingLong(_sprintMs)),
+        const SizedBox(height: 6),
+        const Text('결과는 홈의 순공시간 기록에 자동으로 저장돼요',
+            style: TextStyle(fontSize: 11, color: Colors.grey)),
         const SizedBox(height: 16),
         Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
-          ElevatedButton.icon(
-            onPressed: _savedToHome ? null : _saveToHome,
-            icon: Icon(_savedToHome ? Icons.check_rounded : Icons.playlist_add_rounded),
-            label: Text(_savedToHome ? '홈 기록에 추가됨' : '홈 기록에 추가 (Enter)'),
-            style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
           ElevatedButton.icon(
             onPressed: _restartSame,
             icon: const Icon(Icons.refresh_rounded),
