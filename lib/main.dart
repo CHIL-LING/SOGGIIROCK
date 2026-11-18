@@ -115,12 +115,12 @@ mixin _SelectionMixin<T extends StatefulWidget> on State<T> {
 
   // 선택 삭제 확인 팝업 (삭제를 누르면 true)
   Future<bool> _confirmBulkDelete(BuildContext context) async {
-    final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+    final ok = await showDialog<bool>(context: context, builder: (c) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('선택 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('선택한 ${_selected.length}개를 삭제할까요?'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
     return ok == true;
@@ -167,7 +167,7 @@ Widget _lbl(String text) => Padding(padding: const EdgeInsets.only(bottom: 6),
 InputDecoration _inputDeco(String? hint) => InputDecoration(
   hintText: hint, isDense: true,
   contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFE0E0E0))),
+  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFCFDDF7))),
   focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: kBlue)));
 
 // 확인 다이얼로그에서 엔터(Enter)로 바로 확정할 수 있게 해주는 래퍼
@@ -1539,7 +1539,12 @@ class _Span {
 List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   final s = raw.replaceAll(' ', '*');
   final n = s.length;
-  final words = abbrevs.where((a) => a.word.isNotEmpty).toList();
+  // 약어를 첫 글자별로 묶어 두고, 각 위치에서는 같은 첫 글자의 약어만 비교한다 (약어가 많아도 빠르게)
+  final byFirst = <String, List<AbbreviationModel>>{};
+  for (final a in abbrevs) {
+    if (a.word.isEmpty) continue;
+    (byFirst[a.word[0]] ??= <AbbreviationModel>[]).add(a);
+  }
   // dp[i] = s[i..] 에서 얻을 수 있는 최선의 조합
   // 1순위: 약어가 덮는 글자 수가 많을수록, 2순위(덮는 글자 수가 같으면): 약어 조각 수가 적을수록(= 긴 약어 우선)
   final cnt = List<int>.filled(n + 1, 0);
@@ -1547,7 +1552,9 @@ List<_Span> analyzeText(String raw, List<AbbreviationModel> abbrevs) {
   final pick = List<AbbreviationModel?>.filled(n + 1, null);
   for (int i = n - 1; i >= 0; i--) {
     cnt[i] = cnt[i + 1]; cov[i] = cov[i + 1]; pick[i] = null;
-    for (final a in words) {
+    final cands = byFirst[s[i]];
+    if (cands == null) continue;
+    for (final a in cands) {
       final w = a.word;
       if (!s.startsWith(w, i)) continue;
       final j = i + w.length;
@@ -2171,7 +2178,7 @@ class _HomeScreenState extends State<HomeScreen> {
             Navigator.pop(ctx);
             if (context.mounted) showDialog(context: context, builder: (c2) => _EnterToConfirm(
               onConfirm: () => Navigator.pop(c2),
-              child: AlertDialog(
+              child: SoftAlert(
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
               title: const Text('기록 없음', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
               content: const Text('하나 이상의 항목을 입력해 주세요.'),
@@ -2184,7 +2191,7 @@ class _HomeScreenState extends State<HomeScreen> {
           if (ctx.mounted) Navigator.pop(ctx);
         } finally { busy = false; }
       }
-      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: doSave, child: SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text('$date 기록', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2235,7 +2242,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ])),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx),
-              child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              child: const Text('취소')),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
@@ -2245,12 +2252,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _confirmDeleteRecord(BuildContext context, String date) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('기록 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('$date 의 기록을 삭제할까요?'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
           onPressed: () async { await Store.deleteRecord(date); if (ctx.mounted) Navigator.pop(ctx); },
           child: const Text('삭제')),
@@ -2271,12 +2278,12 @@ class _TypingTimeCardState extends State<_TypingTimeCard> {
     return '${d.hour.toString().padLeft(2,'0')}:${d.minute.toString().padLeft(2,'0')}';
   }
   void _confirmDelete(BuildContext context, TypingSession s) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('순공시간 기록 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('${_hm(s.startMs)} ~ ${_hm(s.endMs)} (${formatTypingLong(s.activeMs)}) 기록을 삭제할까요?'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
           onPressed: () async { await TypingStore.delete(s.id); if (ctx.mounted) Navigator.pop(ctx); },
           child: const Text('삭제')),
@@ -2803,12 +2810,12 @@ class _SentenceAnalyzerScreenState extends State<SentenceAnalyzerScreen> {
         TtsController.instance.stop();
         Navigator.pop(ctx); setState(() {});
       }
-      return _EnterToConfirm(onConfirm: doClear, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: doClear, child: SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('모두 지우기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: const Text('입력한 문장을 모두 지울까요?'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
             onPressed: doClear,
             child: const Text('지우기')),
@@ -3270,12 +3277,12 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
           asking = true;
           final ok = await showDialog<bool>(context: ctx, builder: (c2) => _EnterToConfirm(
             onConfirm: () => Navigator.pop(c2, true),
-            child: AlertDialog(
+            child: SoftAlert(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text('변경사항 저장', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             content: const Text('그룹 설정을 변경할까요?'),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소')),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                 onPressed: () => Navigator.pop(c2, true), child: const Text('저장')),
             ])));
@@ -3284,7 +3291,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
         }
         return _EnterToConfirm(
           onConfirm: doSave,
-          child: AlertDialog(
+          child: SoftAlert(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: Text('그룹 추가/해제 (${selected.length}개 약어)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -3319,7 +3326,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
               }),
             ])),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                 onPressed: doSave, child: const Text('저장')),
             ]));
@@ -3349,7 +3356,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
         if (ctx.mounted) Navigator.pop(ctx);
         _exitSelectMode();
       }
-      return _EnterToConfirm(onConfirm: doApply, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: doApply, child: SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: Text('분류 변경 (${_selected.length}개)', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: _TypeToggleRow(
@@ -3359,7 +3366,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
         onConcurrentChanged: (v) => setS(() => isConcurrent = v),
         onAttachedChanged: (v) => setS(() => isAttached = v)),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: doApply, child: const Text('적용')),
       ]));
@@ -3525,7 +3532,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
   }
 
   void _showCsvDialog(BuildContext context) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('CSV 백업/가져오기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3558,13 +3565,13 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx),
-            child: const Text('닫기', style: TextStyle(color: Colors.grey))),
+            child: const Text('닫기')),
       ]));
   }
 
   void _showCsvImportDialog(BuildContext context) {
     final ctrl = TextEditingController();
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('CSV 가져오기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -3574,7 +3581,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
       ]),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx),
-            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+            child: const Text('취소')),
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () async {
@@ -3598,7 +3605,7 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
   }
 
   void _showGroupFilter(BuildContext context, List<GroupModel> groups) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('그룹 필터', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -3614,12 +3621,12 @@ class _SearchScreenState extends State<SearchScreen> with _SelectionMixin<Search
   }
 
   void _confirmDelete(BuildContext context, AbbreviationModel a) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('삭제 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('"${a.displayWord}" 약어를 삭제할까요?'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
           onPressed: () async { await Store.deleteAbbreviation(a.id); if (ctx.mounted) Navigator.pop(ctx); },
           child: const Text('삭제')),
@@ -3657,12 +3664,12 @@ class _SelectedAbbrViewState extends State<_SelectedAbbrView> {
                     onFav: () async => Store.saveAbbreviation(a.copyWith(isFavorite: !a.isFavorite)),
                     onEdit: () => _showAbbrEditDialog(context, existing: a),
                     onDelete: () async {
-                      final ok = await showDialog<bool>(context: context, builder: (c) => AlertDialog(
+                      final ok = await showDialog<bool>(context: context, builder: (c) => SoftAlert(
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                         title: const Text('삭제 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                         content: Text('"${a.displayWord}" 약어를 삭제할까요?'),
                         actions: [
-                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                          TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소')),
                           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
                               onPressed: () => Navigator.pop(c, true), child: const Text('삭제'))]));
                       if (ok == true) await Store.deleteAbbreviation(a.id);
@@ -3717,12 +3724,12 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         if (dupWords.isNotEmpty) {
           final proceedAnyway = await showDialog<bool>(context: context, builder: (c) => _EnterToConfirm(
             onConfirm: () => Navigator.pop(c, true),
-            child: AlertDialog(
+            child: SoftAlert(
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             title: const Text('이미 등록된 약어', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
             content: Text('다음 약어는 이미 등록되어 있어요:\n${dupWords.join(", ")}\n\n그래도 저장할까요?'),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소')),
               ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                   onPressed: () => Navigator.pop(c, true), child: const Text('그래도 저장'))])));
           if (proceedAnyway != true) return;
@@ -3730,13 +3737,13 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
 
         final ok = await showDialog<bool>(context: context, builder: (c) => _EnterToConfirm(
           onConfirm: () => Navigator.pop(c, true),
-          child: AlertDialog(
+          child: SoftAlert(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           title: Text(existing != null ? '수정 확인' : '저장 확인',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
           content: Text(existing != null ? '수정할까요?' : '${rows.length}개를 저장할까요?'),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+            TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('취소')),
             ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                 onPressed: () => Navigator.pop(c, true), child: const Text('저장'))])));
         if (ok != true) return;
@@ -3797,7 +3804,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
               }),
                 child: Container(padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                   decoration: BoxDecoration(
-                    color: selected ? g.color.withOpacity(0.15) : const Color(0xFFF5F5F5),
+                    color: selected ? g.color.withOpacity(0.15) : kBlueLight,
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(color: selected ? g.color : Colors.transparent, width: 1.5)),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -3812,7 +3819,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
         ],
       ]);
 
-      return _EnterToConfirm(onConfirm: saveAll, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: saveAll, child: SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Text(existing != null ? '약어 수정' : '약어 추가',
@@ -3922,7 +3929,7 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
           }),
         ])),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(dCtx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(dCtx), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8))),
             onPressed: saveAll, child: const Text('저장')),
@@ -4102,7 +4109,7 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
           order: existing?.order ?? Store.nextGroupOrder()));
         if (ctx.mounted) Navigator.pop(ctx);
       }
-      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: doSave, child: SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(existing == null ? '그룹 추가' : '그룹 수정',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -4119,7 +4126,7 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
               child: selectedColor.value == c.value ? const Icon(Icons.check, color: Colors.white, size: 16) : null))).toList()),
         ]),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             onPressed: doSave, child: const Text('저장')),
         ]));
@@ -4127,12 +4134,12 @@ class _GroupManageScreenState extends State<GroupManageScreen> {
   }
 
   void _confirmDeleteGroup(BuildContext context, GroupModel g) {
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('그룹 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('"${g.name}" 그룹을 삭제할까요?\n약어의 그룹 지정은 해제됩니다.'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
           onPressed: () async {
             await Store.deleteGroup(g.id);
@@ -4482,13 +4489,13 @@ class _AbbrListTileState extends State<_AbbrListTile> {
           PopupMenuItem(child: Text(widget.abbr.isFavorite ? '⭐ 즐겨찾기 해제' : '☆ 즐겨찾기 추가'),
               onTap: () => widget.onFav?.call()),
           PopupMenuItem(child: const Text('⌨️ 키보드 보기'),
-              onTap: () => showDialog(context: context, builder: (_) => AlertDialog(
+              onTap: () => showDialog(context: context, builder: (_) => SoftAlert(
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                 title: Text(widget.abbr.displayWord.replaceAll('*',' '),
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                 content: SoggiKeyboardWidget(abbr: widget.abbr),
                 actions: [TextButton(onPressed: () => Navigator.pop(context),
-                    child: const Text('닫기', style: TextStyle(color: Colors.grey)))],
+                    child: const Text('닫기'))],
               ))),
           if (widget.onEdit != null)
             PopupMenuItem(child: const Text('✏️ 수정'), onTap: () => widget.onEdit?.call()),
@@ -4524,7 +4531,7 @@ class _ToggleChip extends StatelessWidget {
     child: AnimatedContainer(duration: const Duration(milliseconds: 150),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
       decoration: BoxDecoration(
-        color: selected ? color.withOpacity(0.15) : const Color(0xFFF5F5F5),
+        color: selected ? color.withOpacity(0.15) : kBlueLight,
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: selected ? color : Colors.transparent, width: 1.5)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -4539,7 +4546,8 @@ class _ClampedText extends StatefulWidget {
   final TextStyle style;
   final bool selectable;
   final int maxLines;
-  const _ClampedText({required this.text, required this.style, this.selectable = false, this.maxLines = 10});
+  final TextSpan? rich; // 있으면 이 모양(약어 표시 등)으로 그림
+  const _ClampedText({required this.text, required this.style, this.selectable = false, this.maxLines = 10, this.rich});
   @override State<_ClampedText> createState() => _ClampedTextState();
 }
 class _ClampedTextState extends State<_ClampedText> {
@@ -4547,15 +4555,21 @@ class _ClampedTextState extends State<_ClampedText> {
   @override
   Widget build(BuildContext context) => LayoutBuilder(builder: (ctx, cons) {
     final tp = TextPainter(
-      text: TextSpan(text: widget.text, style: widget.style),
+      text: widget.rich ?? TextSpan(text: widget.text, style: widget.style),
       textDirection: TextDirection.ltr, maxLines: widget.maxLines)
       ..layout(maxWidth: cons.maxWidth.isFinite ? cons.maxWidth : 10000);
     final overflow = tp.didExceedMaxLines;
     final collapsed = overflow && !_expanded;
+    final r = widget.rich;
     final body = widget.selectable
-        ? SelectableText(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null)
-        : Text(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null,
-            overflow: collapsed ? TextOverflow.ellipsis : TextOverflow.clip);
+        ? (r != null
+            ? SelectableText.rich(r, maxLines: collapsed ? widget.maxLines : null)
+            : SelectableText(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null))
+        : (r != null
+            ? Text.rich(r, maxLines: collapsed ? widget.maxLines : null,
+                overflow: collapsed ? TextOverflow.ellipsis : TextOverflow.clip)
+            : Text(widget.text, style: widget.style, maxLines: collapsed ? widget.maxLines : null,
+                overflow: collapsed ? TextOverflow.ellipsis : TextOverflow.clip));
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       body,
       if (overflow)
@@ -4578,7 +4592,44 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
   String _sgFilter = '';
   String _sgQuery = '';
   final _sgSearchCtrl = TextEditingController();
-  @override void dispose() { _ctrl.dispose(); _focusNode.dispose(); _sgSearchCtrl.dispose(); super.dispose(); }
+
+  // 약어 표시 (켜고 끌 수 있음) — 화면에 보이는 문장만 분석하고 결과는 저장해 둠
+  bool _showAbbr = Hive.box('settings').get('list_abbr', defaultValue: false) as bool;
+  final Map<String, List<_Span>> _spanCache = {};
+  List<AbbreviationModel>? _abList;
+  late final _abListenable = Hive.box('abbreviations').listenable();
+  void _onAbChanged() { _spanCache.clear(); _abList = null; }
+
+  @override void initState() { super.initState(); _abListenable.addListener(_onAbChanged); }
+  @override void dispose() {
+    _abListenable.removeListener(_onAbChanged);
+    _ctrl.dispose(); _focusNode.dispose(); _sgSearchCtrl.dispose(); super.dispose();
+  }
+
+  void _toggleAbbr() {
+    setState(() => _showAbbr = !_showAbbr);
+    Hive.box('settings').put('list_abbr', _showAbbr);
+  }
+
+  TextSpan? _abbrSpan(String text, TextStyle base) {
+    if (!_showAbbr) return null;
+    _abList ??= Store.getAbbreviations();
+    final parts = _spanCache.putIfAbsent(text, () => analyzeText(text, _abList!));
+    return TextSpan(style: base, children: parts.map((p) {
+      if (p.abbr == null) return TextSpan(text: p.text);
+      final c = p.type == 'composite' ? kBlueSky : p.type == 'concurrent' ? kPurple : kBlue;
+      return TextSpan(text: p.text, style: TextStyle(color: c, fontWeight: FontWeight.w700));
+    }).toList());
+  }
+
+  // 지금 보이는 문장(그룹을 보고 있으면 그 그룹)을 한 번에 복사
+  void _copyShown(List<SavedSentenceModel> list) {
+    if (list.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: list.map((s) => s.text).join('\n')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('문장 ${list.length}개를 복사했어요'), backgroundColor: kBlue,
+        duration: const Duration(seconds: 2)));
+  }
 
   Future<void> _bulkDelete(BuildContext context, List<SavedSentenceModel> all) async {
     if (!await _confirmBulkDelete(context)) return;
@@ -4610,12 +4661,12 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
     if (_selected.length != 1) return;
     final s = all.firstWhere((s) => _selected.contains(s.id));
     final ctrl = TextEditingController(text: s.text);
-    showDialog(context: context, builder: (ctx) => AlertDialog(
+    showDialog(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('문장 수정', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: TextField(controller: ctrl, maxLines: 4, decoration: _inputDeco('')),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () async {
             final text = ctrl.text.trim();
@@ -4646,12 +4697,12 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
     }
     showDialog(context: context, builder: (ctx) => _EnterToConfirm(
       onConfirm: () => doSave(ctx),
-      child: AlertDialog(
+      child: SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('저장 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: const Text('저장할까요?'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () => doSave(ctx), child: const Text('저장')),
       ])));
@@ -4688,9 +4739,8 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
         return Scaffold(backgroundColor: Colors.white, resizeToAvoidBottomInset: true,
           body: SafeArea(child: Column(children: [
             Padding(padding: const EdgeInsets.fromLTRB(20,20,20,12),
-              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-              ])),
+              child: const Align(alignment: Alignment.centerLeft,
+                child: Text('문장 등록', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)))),
             Padding(padding: const EdgeInsets.symmetric(horizontal: 16), child: Column(children: [
               Focus(onKeyEvent: (node, event) {
                 if (event is KeyDownEvent &&
@@ -4731,14 +4781,18 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                         borderSide: const BorderSide(color: kBlue)))),
                 const SizedBox(height: 8),
                 // 정렬 / 선택 버튼 (검색창 아래)
-                Row(children: [
+                Wrap(spacing: 8, runSpacing: 6, children: [
                   GestureDetector(
                     onTap: () async { await Store.setSentenceNewestFirst(!newest); if (mounted) setState(() {}); },
                     child: _actionChip(Icons.swap_vert_rounded, newest ? '최신순' : '오래된순', kBlue)),
-                  const SizedBox(width: 8),
                   if (!_selectMode)
                     GestureDetector(onTap: _toggleSelectMode,
                       child: _actionChip(Icons.checklist_rounded, '선택', kBlue)),
+                  GestureDetector(onTap: _toggleAbbr,
+                    child: _toolChip(Icons.spellcheck_rounded, '약어 표시', active: _showAbbr)),
+                  if (!_selectMode)
+                    GestureDetector(onTap: () => _copyShown(sentences),
+                      child: _actionChip(Icons.copy, inGroupFilter ? '그룹 복사' : '전체 복사', kBlueSky)),
                 ]),
                 if (_selectMode) ...[
                   const SizedBox(height: 10),
@@ -4841,7 +4895,8 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                                 color: isSelected ? kBlue : Colors.grey, size: 20),
                             const SizedBox(width: 10),
                             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              _ClampedText(text: s.text, style: const TextStyle(fontSize: 14, height: 1.6)),
+                              _ClampedText(text: s.text, style: const TextStyle(fontSize: 14, height: 1.6),
+                                  rich: _abbrSpan(s.text, const TextStyle(fontSize: 14, height: 1.6, color: Colors.black87))),
                               tags(s.id),
                             ])),
                           ])));
@@ -4851,7 +4906,8 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                           border: Border.all(color: const Color(0xFFEEF0F8))),
                       child: Row(children: [
                         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                          _ClampedText(text: s.text, selectable: true, style: const TextStyle(fontSize: 14, height: 1.6)),
+                          _ClampedText(text: s.text, selectable: true, style: const TextStyle(fontSize: 14, height: 1.6),
+                              rich: _abbrSpan(s.text, const TextStyle(fontSize: 14, height: 1.6, color: Colors.black87))),
                           tags(s.id),
                         ])),
                         PopupMenuButton<String>(
@@ -4860,12 +4916,12 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                           onSelected: (v) async {
                             if (v == 'edit') {
                               final ctrl2 = TextEditingController(text: s.text);
-                              showDialog(context: ctx, builder: (c2) => AlertDialog(
+                              showDialog(context: ctx, builder: (c2) => SoftAlert(
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                                 title: const Text('문장 수정', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                                 content: TextField(controller: ctrl2, maxLines: 4, decoration: _inputDeco('')),
                                 actions: [
-                                  TextButton(onPressed: () => Navigator.pop(c2), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                                  TextButton(onPressed: () => Navigator.pop(c2), child: const Text('취소')),
                                   ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                                     onPressed: () async {
                                       final t = ctrl2.text.trim(); if (t.isEmpty) return;
@@ -4876,12 +4932,12 @@ class _SentenceRegisterScreenState extends State<SentenceRegisterScreen> with _S
                             }
                             if (v == 'remind') _showReminderDialog(ctx, s.text, 'sentence');
                             if (v == 'delete') {
-                              final ok = await showDialog<bool>(context: ctx, builder: (c2) => AlertDialog(
+                              final ok = await showDialog<bool>(context: ctx, builder: (c2) => SoftAlert(
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                                 title: const Text('삭제 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                                 content: const Text('이 문장을 삭제할까요?'),
                                 actions: [
-                                  TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                                  TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소')),
                                   ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
                                       onPressed: () => Navigator.pop(c2, true), child: const Text('삭제'))]));
                               if (ok == true) await Store.deleteSentence(s.id);
@@ -4943,7 +4999,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
         if (ctx.mounted) Navigator.pop(ctx);
         _exitSelectMode();
       }
-      return _EnterToConfirm(onConfirm: doSave, child: AlertDialog(
+      return _EnterToConfirm(onConfirm: doSave, child: SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: Text(single ? '리마인드 수정' : '리마인드 일괄 수정 (${selectedReminders.length}개)',
             style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
@@ -4977,7 +5033,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
             onRepeatChanged: (v) => setS(() => repeat = v)),
         ])),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             onPressed: doSave, child: const Text('저장')),
         ]));
@@ -5000,7 +5056,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
     }
     final Set<String> checked = {};
     final apply = await showDialog<bool>(context: context, builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setS) => AlertDialog(
+      builder: (ctx, setS) => SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('그룹 추가 (중복 가능)', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -5012,7 +5068,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
             onChanged: (v) => setS(() { if (v == true) checked.add(g.id); else checked.remove(g.id); }))),
         ])),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(ctx, true), child: const Text('추가')),
         ])));
@@ -5181,7 +5237,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
       if (q.isNotEmpty) {
         items = items.where((t) => t.replaceAll('*', ' ').contains(q) || t.contains(q)).toList();
       }
-      return AlertDialog(
+      return SoftAlert(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('리마인드 추가', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
         content: SingleChildScrollView(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -5241,7 +5297,7 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
             onRepeatChanged: (v) => setS(() => repeat = v)),
         ])),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             onPressed: () async {
               final targets = <String>[...selectedTargets];
@@ -5250,12 +5306,12 @@ class _RemindersScreenState extends State<RemindersScreen> with _SelectionMixin<
               Navigator.pop(ctx);
               final hasDup = targets.any((t) => Store.findReminder(t) != null);
               if (hasDup) {
-                final ok = await showDialog<bool>(context: context, builder: (c2) => AlertDialog(
+                final ok = await showDialog<bool>(context: context, builder: (c2) => SoftAlert(
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   title: const Text('중복 리마인드', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
                   content: const Text('이미 추가된 리마인드가 있습니다.\n그래도 저장하시겠습니까?'),
                   actions: [
-                    TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+                    TextButton(onPressed: () => Navigator.pop(c2, false), child: const Text('취소')),
                     ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
                         onPressed: () => Navigator.pop(c2, true), child: const Text('저장'))]));
                 if (ok != true) return;
@@ -5307,7 +5363,7 @@ void _reminderDialog(BuildContext context, List<String> targets, String type, {b
   final existing = bulk ? null : Store.findReminder(targets.first);
   int interval = existing?.intervalDays ?? 1;
   bool repeat = existing?.repeat ?? false;
-  showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+  showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SoftAlert(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: Text(bulk ? '리마인드 설정 (${targets.length}개)' : (existing != null ? '리마인드 수정' : '리마인드 설정'),
         style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
@@ -5315,7 +5371,7 @@ void _reminderDialog(BuildContext context, List<String> targets, String type, {b
       onIntervalChanged: (v) => setS(() => interval = v),
       onRepeatChanged: (v) => setS(() => repeat = v)),
     actions: [
-      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
       ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
         onPressed: () async {
           final ds = _ymd(DateTime.now().add(Duration(days: interval)));
@@ -5473,7 +5529,46 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     _startRun(List<String>.from(_queue));
   }
 
+  // 약어 표시 (켜고 끌 수 있음). 채점 색(초록/빨강)이 우선이라 약어는 밑줄로만 표시한다.
+  bool _showAbbr = Hive.box('settings').get('sprint_abbr', defaultValue: false) as bool;
+  List<AbbreviationModel>? _abbrCache;
+  List<int> _abbrKind = [], _abbrSeg = []; // 글자별: 약어 종류(1 일반/2 합성/3 동시) · 약어 조각 번호
+
+  void _computeAbbr() {
+    if (!_showAbbr || _target.isEmpty) { _abbrKind = []; _abbrSeg = []; return; }
+    _abbrCache ??= Store.getAbbreviations();
+    final kind = List<int>.filled(_target.length, 0);
+    final seg = List<int>.filled(_target.length, 0);
+    int pos = 0, n = 0;
+    for (final p in analyzeText(_target, _abbrCache!)) {
+      final k = p.type == 'abbr' ? 1 : p.type == 'composite' ? 2 : p.type == 'concurrent' ? 3 : 0;
+      if (k != 0) n++;
+      for (int c = 0; c < p.text.length && pos < kind.length; c++, pos++) {
+        kind[pos] = k; seg[pos] = k == 0 ? 0 : n;
+      }
+    }
+    _abbrKind = kind; _abbrSeg = seg;
+  }
+
+  void _toggleAbbr() {
+    setState(() { _showAbbr = !_showAbbr; _computeAbbr(); });
+    Hive.box('settings').put('sprint_abbr', _showAbbr);
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && !_finished) _inputFocus.requestFocus(); });
+  }
+
+  Widget _abbrToggleChip() => GestureDetector(onTap: _toggleAbbr,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(color: _showAbbr ? kBlue : kBlueLight, borderRadius: BorderRadius.circular(20)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.spellcheck_rounded, size: 15, color: _showAbbr ? Colors.white : kBlue),
+        const SizedBox(width: 4),
+        Text(_showAbbr ? '약어 표시 끄기' : '약어 표시',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: _showAbbr ? Colors.white : kBlue)),
+      ])));
+
   void _startRun(List<String> items) {
+    _abbrCache = null; // 약어를 새로 등록했을 수 있으니 시작할 때마다 다시 읽음
     _timer?.cancel();
     _ticker.stop();
     setState(() {
@@ -5508,6 +5603,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     _tp = null; _tpKey = '';
     _scrollTarget = 0;
     if (_sentenceScroll.hasClients) _sentenceScroll.jumpTo(0);
+    _computeAbbr();
   }
 
   // ── 끝내기 / 중단 / 처음으로 ──
@@ -5823,10 +5919,16 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   List<TextSpan> _buildColoredText() {
     final spans = <TextSpan>[];
     final buf = StringBuffer();
-    Color? cur;
+    Color? cur; int curKind = 0, curSeg = 0;
     void flush() {
       if (buf.isEmpty) return;
-      spans.add(TextSpan(text: buf.toString(), style: _baseStyle.copyWith(color: cur ?? Colors.grey.shade400)));
+      TextStyle st = _baseStyle.copyWith(color: cur ?? Colors.grey.shade400);
+      if (curKind != 0) {
+        final uc = curKind == 2 ? kBlueSky : curKind == 3 ? kPurple : kBlue;
+        st = st.copyWith(decoration: TextDecoration.underline, decorationThickness: 2.5,
+            decorationColor: curSeg.isEven ? uc.withOpacity(0.5) : uc); // 붙어 있는 약어는 번갈아 진하게
+      }
+      spans.add(TextSpan(text: buf.toString(), style: st));
       buf.clear();
     }
     int normIdx = 0;
@@ -5839,7 +5941,9 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       else if (state == 'wrong') { color = Colors.red; }
       else if (normIdx == _alignEnd) { color = kBlue; }
       else { color = Colors.grey.shade400; }
-      if (cur != color) { flush(); cur = color; }
+      final kind = (_showAbbr && k < _abbrKind.length) ? _abbrKind[k] : 0;
+      final seg = (_showAbbr && k < _abbrSeg.length) ? _abbrSeg[k] : 0;
+      if (cur != color || curKind != kind || curSeg != seg) { flush(); cur = color; curKind = kind; curSeg = seg; }
       buf.write(ch);
       normIdx++;
     }
@@ -5976,6 +6080,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   Widget _buildHeader() => Row(children: [
     const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
     const Spacer(),
+    if (!_finished) ...[_abbrToggleChip(), const SizedBox(width: 8)],
     if (!_finished) ...[
       GestureDetector(onTap: _stop,
         child: Container(
@@ -6494,6 +6599,7 @@ class _QuizScreenState extends State<QuizScreen> {
     });
     _beginQuestionTrack();
     _playCurrentTts();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _inputFocusNode.requestFocus(); });
   }
 
   // 문제가 새로 나올 때마다 주춤 기록 초기화
@@ -6673,6 +6779,7 @@ class _QuizScreenState extends State<QuizScreen> {
     });
     _beginQuestionTrack();
     _playCurrentTts();
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _inputFocusNode.requestFocus(); });
   }
 
   void _retryAll() {
@@ -6720,7 +6827,7 @@ class _QuizScreenState extends State<QuizScreen> {
       ]),
       actions: [
         TextButton(onPressed: () { picked.clear(); Navigator.pop(ctx); },
-            child: const Text('취소', style: TextStyle(color: Colors.grey))),
+            child: const Text('취소')),
         ElevatedButton(
           onPressed: () => Navigator.pop(ctx),
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
@@ -6781,12 +6888,12 @@ class _QuizScreenState extends State<QuizScreen> {
   }
 
   Future<void> _hzGraduate(String gid, List<AbbreviationModel> grads) async {
-    final ok = await showDialog<bool>(context: context, builder: (ctx) => AlertDialog(
+    final ok = await showDialog<bool>(context: context, builder: (ctx) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('졸업 약어 삭제', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Text('${Store.hzGoal()}회 연속 정답을 채운 ${grads.length}개 약어를 이 그룹에서 뺄까요?\n(약어 자체는 지워지지 않아요)'),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('취소')),
         ElevatedButton(onPressed: () => Navigator.pop(ctx, true),
             style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
             child: const Text('삭제')),
@@ -6800,7 +6907,7 @@ class _QuizScreenState extends State<QuizScreen> {
     if (wrongItems.isEmpty) return;
     final nameCtrl = TextEditingController(text: '오답노트 ${DateTime.now().month}/${DateTime.now().day}');
     Color selectedColor = kGroupColors[0];
-    await showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => AlertDialog(
+    await showDialog(context: context, builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('오답 그룹 저장', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
       content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -6816,7 +6923,7 @@ class _QuizScreenState extends State<QuizScreen> {
             child: selectedColor.value == c.value ? const Icon(Icons.check, color: Colors.white, size: 14) : null))).toList()),
       ]),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           onPressed: () async {
@@ -6955,7 +7062,7 @@ class _QuizScreenState extends State<QuizScreen> {
         ]),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx),
-              child: const Text('닫기', style: TextStyle(color: Colors.grey))),
+              child: const Text('닫기')),
           ElevatedButton(
             onPressed: selected.isEmpty ? null : () async {
               for (final t in selected.toList()) {
@@ -7191,7 +7298,7 @@ Widget _buildQuiz() {
     return Scaffold(backgroundColor: Colors.white,
       body: SafeArea(child: KeyboardListener(
         focusNode: _keyboardFocusNode,
-        autofocus: true,
+        autofocus: false, // 입력창이 처음부터 포커스를 갖도록 (여기가 가져가면 입력창을 눌러야 했음)
         onKeyEvent: (event) {
           // 다시 듣기: 오른쪽 Shift를 혼자 눌렀다 뗄 때만. Shift를 누른 채 다른 키를 치면(쌍자음) 재생 안 함.
           // 왼쪽 Shift는 다시 듣기와 상관없음.
@@ -7508,33 +7615,55 @@ Widget sgChip(String label, bool on, VoidCallback onTap, {Color color = kBlue, V
           color: on ? Colors.white : color))));
 
 // 화면 가운데에 뜨는 일반 팝업 (큰 화면에서는 최대 폭을 제한해 가운데에 놓는다)
-Widget centerDialog({required String title, required Widget child, List<Widget>? actions}) => Dialog(
-  backgroundColor: Colors.white,
-  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-  insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-  child: ConstrainedBox(
-    constraints: const BoxConstraints(maxWidth: 440),
-    child: Padding(padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+// 모든 추가·확인 팝업이 같이 쓰는 공통 디자인 (흰 배경 + 연한 파란 제목 띠, 회색 없음)
+class SoftAlert extends StatelessWidget {
+  final Widget? title, content;
+  final List<Widget>? actions;
+  final ShapeBorder? shape; // 예전 AlertDialog 코드 호환용 (사용 안 함)
+  const SoftAlert({super.key, this.title, this.content, this.actions, this.shape});
+  @override
+  Widget build(BuildContext context) => Dialog(
+    backgroundColor: Colors.white,
+    surfaceTintColor: Colors.transparent,
+    clipBehavior: Clip.antiAlias,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20),
+        side: const BorderSide(color: Color(0xFFCFDDF7), width: 1.2)),
+    insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+    child: ConstrainedBox(
+      constraints: const BoxConstraints(minWidth: 300, maxWidth: 460),
       child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
-        const SizedBox(height: 12),
-        Flexible(child: child),
-        if (actions != null) ...[
-          const SizedBox(height: 8),
-          Row(mainAxisAlignment: MainAxisAlignment.end, children: actions),
-        ],
-      ]))));
+        if (title != null)
+          Container(width: double.infinity, color: kBlueLight,
+            padding: const EdgeInsets.fromLTRB(22, 16, 22, 14),
+            child: DefaultTextStyle(
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800, color: kBlueDark),
+              child: title!)),
+        if (content != null)
+          Flexible(child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 18, 22, 6),
+            child: DefaultTextStyle(
+              style: const TextStyle(fontSize: 14, color: Colors.black87), child: content!))),
+        if (actions != null && actions!.isNotEmpty)
+          Padding(padding: const EdgeInsets.fromLTRB(14, 6, 14, 14),
+            child: Align(alignment: Alignment.centerRight,
+              child: Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 4, children: actions!))),
+      ])));
+}
+
+// 화면 가운데에 뜨는 일반 팝업 (SoftAlert와 같은 모양)
+Widget centerDialog({required String title, required Widget child, List<Widget>? actions}) =>
+    SoftAlert(title: Text(title), content: child, actions: actions);
 
 Future<String?> askSentenceGroupName(BuildContext context, String title, {String initial = ''}) {
   final ctrl = TextEditingController(text: initial);
-  return showDialog<String>(context: context, builder: (ctx) => AlertDialog(
+  return showDialog<String>(context: context, builder: (ctx) => SoftAlert(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
     content: TextField(controller: ctrl, autofocus: true,
         decoration: _inputDeco('그룹 이름 (예: 경제 기사, 오답 문장)'),
         onSubmitted: (v) => Navigator.pop(ctx, v.trim())),
     actions: [
-      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.grey))),
+      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
       ElevatedButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
           style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white),
           child: const Text('확인')),
@@ -7557,7 +7686,7 @@ Future<bool> assignSentencesToGroupDialog(BuildContext context, List<String> ids
         onTap: () => Navigator.pop(ctx, g['id'] as String))),
     ]),
     actions: [TextButton(onPressed: () => Navigator.pop(ctx),
-        child: const Text('취소', style: TextStyle(color: Colors.grey)))]));
+        child: const Text('취소'))]));
   if (choice == null) return false;
   var gid = choice;
   if (choice == '__new__') {
@@ -7582,7 +7711,7 @@ Future<void> sentenceGroupMenuDialog(BuildContext context, Map<String, dynamic> 
           onTap: () => Navigator.pop(ctx, 'delete')),
     ]),
     actions: [TextButton(onPressed: () => Navigator.pop(ctx),
-        child: const Text('취소', style: TextStyle(color: Colors.grey)))]));
+        child: const Text('취소'))]));
   if (act == 'rename') {
     if (!context.mounted) return;
     final name = await askSentenceGroupName(context, '그룹 이름 바꾸기', initial: g['name'] as String);
@@ -7598,7 +7727,7 @@ Future<void> showHzHelp(BuildContext context) {
       child: Text(t, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800)));
   Widget b(String t) => Padding(padding: const EdgeInsets.only(bottom: 3),
       child: Text(t, style: const TextStyle(fontSize: 12, height: 1.5)));
-  return showDialog(context: context, builder: (ctx) => AlertDialog(
+  return showDialog(context: context, builder: (ctx) => SoftAlert(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: const Text('주춤한 약어란?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
     content: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -7636,7 +7765,7 @@ Future<void> showHzSettings(BuildContext context) {
         IconButton(icon: const Icon(Icons.add_circle_outline, size: 20),
           onPressed: value >= max ? null : () async { await Store.setHzCfg(key, value + 1); setS(() {}); }),
       ]));
-    return AlertDialog(
+    return SoftAlert(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       title: const Text('주춤 기준 바꾸기', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800)),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -7651,7 +7780,7 @@ Future<void> showHzSettings(BuildContext context) {
 
 // 다음 주 월요일부터: 지난주 주춤 약어 그룹 테스트 알림
 Future<void> showHzDueDialog(BuildContext context, List<String> gids, String todayKey) {
-  return showDialog(context: context, builder: (ctx) => AlertDialog(
+  return showDialog(context: context, builder: (ctx) => SoftAlert(
     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
     title: const Row(children: [
       Icon(Icons.notifications_rounded, size: 18, color: Color(0xFFFF9800)),
