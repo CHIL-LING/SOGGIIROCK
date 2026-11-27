@@ -18,6 +18,7 @@ void main() async {
   await Hive.openBox('settings'); // 추가
   await Hive.openBox('quizWrongLog'); // 테스트 오답 기록(역대 통계용)
   await Hive.openBox('quizAttempts'); // 약어 테스트 출제·정오 기록 (취약점 오답률용)
+  await Hive.openBox('sprintErrors'); // 스프린트에서 틀린 문장·단어·약어 기록
   await Hive.openBox('typingSessions'); // 순공시간(타이핑) 세션 기록
   TtsController.instance._init(); // Hive 열린 후 설정 로드
   await TypingTracker.instance.init(); // 지난 실행에서 저장 못 한 세션 복구
@@ -747,6 +748,47 @@ class Store {
 
   // 취약점 분석: 약어에 등록한 운지(초·중·종성 키) 기준으로 키별 출제/오답 수를 센다.
   // 출제 기록이 30문제 이상이면 오답률, 아직 적으면 예전 오답 기록으로 오답 횟수를 센다.
+  // 스프린트에서 틀린 곳 기록 (자주 틀리는 문장·단어·약어 집계용)
+  static Future<void> logSprintErrors({required String hash, required String label, required int errors,
+      required List<String> words, required List<String> abbrs}) =>
+      Hive.box('sprintErrors').add({'ts': DateTime.now().toIso8601String(), 'h': hash, 'label': label,
+        'n': errors, 'w': words, 'a': abbrs});
+
+  static List<Map<String, dynamic>> getSprintErrors({int days = 30}) {
+    final cutoff = days <= 0 ? DateTime(2000) : DateTime.now().subtract(Duration(days: days));
+    final out = <Map<String, dynamic>>[];
+    for (final e in Hive.box('sprintErrors').values) {
+      final m = Map<String, dynamic>.from(e as Map);
+      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+      if (ts == null || ts.isBefore(cutoff)) continue;
+      out.add(m);
+    }
+    return out;
+  }
+
+  // 문장별로 최근 N일 동안 틀린 스프린트 횟수 (문장 해시 → 횟수)
+  static Map<String, int> sprintSentenceCounts({int days = 30}) {
+    final c = <String, int>{};
+    for (final m in getSprintErrors(days: days)) {
+      final h = m['h'] as String;
+      c[h] = (c[h] ?? 0) + 1;
+    }
+    return c;
+  }
+
+  // 최근 N일 안에 min번 이상 틀린 단어(w)·약어(a)
+  static Map<String, Set<String>> sprintHot({int days = 30, int min = 2}) {
+    final w = <String, int>{}, a = <String, int>{};
+    for (final m in getSprintErrors(days: days)) {
+      for (final x in (m['w'] as List? ?? const [])) { final k = x as String; w[k] = (w[k] ?? 0) + 1; }
+      for (final x in (m['a'] as List? ?? const [])) { final k = x as String; a[k] = (a[k] ?? 0) + 1; }
+    }
+    return {
+      'w': {for (final e in w.entries) if (e.value >= min) e.key},
+      'a': {for (final e in a.entries) if (e.value >= min) e.key},
+    };
+  }
+
   static KeyWeakResult analyzeKeyWeakness({required DateTime from, required DateTime to,
       List<AbbreviationModel>? abbrs, bool? forceRate}) {
     final byText = <String, AbbreviationModel>{};
@@ -3079,7 +3121,79 @@ class _GraphScreenState extends State<GraphScreen> {
       chart,
     ]));
 
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [cardNow, cardNext, cardRoad, cardTrend]);
+    final diag = _diagCard(nextTarget, today);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start,
+        children: [cardNow, cardNext, if (diag != null) diag, cardRoad, cardTrend]);
+  }
+
+  // 정체 진단: 최근 스프린트(최대 5회)의 타수·정확도로 "속도 문제인지 정확도 문제인지" 보기
+  Widget? _diagCard(int nextTarget, DateTime today) {
+    final all = TypingStore.all().where((x) {
+      final d = DateTime.tryParse(x.date);
+      return (x.tasu ?? 0) > 0 && x.accuracy != null && d != null && today.difference(d).inDays < 14;
+    }).toList();
+    if (all.isEmpty) return null;
+    final rec = all.length > 5 ? all.sublist(all.length - 5) : all;
+    double sumT = 0, sumA = 0;
+    int oja = 0, chum = 0, tal = 0;
+    for (final x in rec) {
+      sumT += x.tasu!;
+      sumA += x.accuracy!;
+      oja += x.oja ?? 0;
+      chum += x.chum ?? 0;
+      tal += x.tal ?? 0;
+    }
+    final avgT = sumT / rec.length, avgA = sumA / rec.length;
+    if (avgA <= 0) return null;
+    final eff = avgT * avgA / 100;
+    final errs = oja + chum + tal;
+    final lines = <String>[];
+    if (eff >= nextTarget) {
+      lines.add('실질 타수가 다음 단계 목표($nextTarget타)를 넘었어요. 진도를 올려 볼 때예요.');
+    } else {
+      final needAcc = nextTarget / avgT * 100;
+      final needT = nextTarget / (avgA / 100);
+      if (needAcc <= 100) {
+        lines.add('지금 속도(${avgT.round()}타)를 유지하면 정확도 ${needAcc.toStringAsFixed(1)}%만 되면 목표에 닿아요 '
+            '(지금보다 +${(needAcc - avgA).toStringAsFixed(1)}%p). 정확도가 지름길이에요.');
+      } else {
+        lines.add('지금 속도(${avgT.round()}타)로는 정확도를 100%로 해도 목표($nextTarget타)에 못 미쳐요. 속도를 먼저 올려야 해요.');
+      }
+      lines.add('지금 정확도(${avgA.toStringAsFixed(1)}%)를 유지한다면 ${needT.round()}타가 필요해요 '
+          '(지금보다 +${(needT - avgT).round()}타).');
+    }
+    if (errs > 0) {
+      final kinds = [MapEntry('탈자', tal), MapEntry('오자', oja), MapEntry('첨자', chum)]
+        ..sort((a, b) => b.value.compareTo(a.value));
+      lines.add('가장 많이 잃는 건 ${kinds.first.key} ${kinds.first.value}개예요 '
+          '(전체 틀림 $errs개 중 ${(kinds.first.value / errs * 100).round()}%).');
+    }
+    Widget num(String v, String label) => Expanded(child: Column(children: [
+      Text(v, style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900, color: kBlueDark)),
+      const SizedBox(height: 2),
+      Text(label, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+    ]));
+    return _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Expanded(child: Text('정체 진단', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900))),
+        GestureDetector(
+          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FrequentErrorsScreen())),
+          child: _actionChip(Icons.insights_rounded, '자주 틀리는 것', kPurple)),
+      ]),
+      const SizedBox(height: 2),
+      Text('최근 스프린트 ${rec.length}회 기준 (실질 타수 = 타수 × 정확도, 참고용 계산)',
+          style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 12),
+      Row(children: [
+        num('${avgT.round()}타', '평균 타수'),
+        num('${avgA.toStringAsFixed(1)}%', '평균 정확도'),
+        num('${eff.round()}타', '실질 타수'),
+      ]),
+      const SizedBox(height: 12),
+      for (final l in lines)
+        Padding(padding: const EdgeInsets.only(bottom: 4),
+          child: Text(l, style: const TextStyle(fontSize: 12.5, height: 1.5, color: Colors.black87))),
+    ]));
   }
 
   // 목표까지 채워지는 게이지 (보라색 눈금 = 현재 단계 기준 타수)
@@ -6257,6 +6371,287 @@ void _reminderDialog(BuildContext context, List<String> targets, String type, {b
     ])));
 }
 
+// ── 오타장 (틀린 부분 앞뒤 10글자 문장) · 자주 틀리는 문장/단어/약어 ──────────────────
+
+// 문장을 구분하는 해시 (웹에서도 같은 값이 나오도록 작은 수로만 계산)
+String sprintHash(String s) {
+  var h1 = 7, h2 = 11;
+  for (final c in s.codeUnits) {
+    h1 = (h1 * 31 + c) % 1000000007;
+    h2 = (h2 * 131 + c) % 998244353;
+  }
+  return '${s.length}-$h1-$h2';
+}
+
+// 어절 앞뒤의 문장부호를 떼고 비교 ("경제를," → "경제를")
+String _wordCore(String w) => w.replaceAll(RegExp(r'^[^0-9A-Za-z가-힣]+|[^0-9A-Za-z가-힣]+$'), '');
+
+String _shortLabel(String s) {
+  final t = s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  return t.length > 26 ? '${t.substring(0, 26)}…' : t;
+}
+
+// 오타장 문장 하나 (hard = 오자·탈자 위치, soft = 첨자가 끼어든 위치. 둘 다 text 기준 글자 번호)
+class _TypoNote {
+  final String text;
+  final Set<int> hard, soft;
+  const _TypoNote(this.text, this.hard, this.soft);
+}
+
+class _TypoAnalysis {
+  final List<_TypoNote> notes;
+  final Set<String> words, abbrs; // 틀린 곳이 들어 있던 어절 / 약어
+  final int errors;
+  const _TypoAnalysis(this.notes, this.words, this.abbrs, this.errors);
+}
+
+// 한 문장의 채점 결과에서 틀린 곳을 찾아, 앞뒤 ctx글자(공백 제외)를 붙인 문장으로 만든다.
+// - 앞뒤 창이 겹치면 한 문장으로 합친다.
+// - 창의 경계가 약어 중간에 걸리면 그 약어는 통째로 포함한다.
+_TypoAnalysis _analyzeTypos(_SprintSentenceResult r, List<AbbreviationModel> abbrs, {int ctx = 10}) {
+  final n = r.normToFull.length;
+  final hard = <int>[], soft = <int>[];
+  int t = 0, talRun = 0, errors = 0;
+  for (final op in r.ops) {
+    if (op.kind == 'tal') {
+      errors++;
+      talRun++;
+      // 끝까지 못 친 긴 꼬리는 앞의 40글자만 오타장에 넣는다
+      if (t < n && talRun <= 40) hard.add(t);
+      t++;
+      continue;
+    }
+    talRun = 0;
+    if (op.kind == 'ok') { t++; }
+    else if (op.kind == 'oja') { errors++; if (t < n) hard.add(t); t++; }
+    else if (op.kind == 'chum') { errors++; if (n > 0) soft.add(math.min(t, n - 1)); }
+  }
+  if (n == 0 || (hard.isEmpty && soft.isEmpty)) {
+    return _TypoAnalysis(const <_TypoNote>[], const <String>{}, const <String>{}, errors);
+  }
+
+  // 틀린 위치를 가까운 것끼리 묶기
+  final all = <int>{...hard, ...soft}.toList()..sort();
+  final groups = <List<int>>[];
+  for (final i in all) {
+    if (groups.isNotEmpty && i - ctx <= groups.last.last + ctx) { groups.last.add(i); }
+    else { groups.add([i]); }
+  }
+
+  // 약어가 덮는 구간 (원문 글자 위치)
+  final spanS = <int>[], spanE = <int>[];
+  final spanA = <String>[];
+  if (abbrs.isNotEmpty) {
+    int pos = 0;
+    for (final p in analyzeText(r.target, abbrs)) {
+      final a = p.abbr;
+      if (a != null) { spanS.add(pos); spanE.add(pos + p.text.length); spanA.add(a.quizText); }
+      pos += p.text.length;
+    }
+  }
+
+  final notes = <_TypoNote>[];
+  for (final g in groups) {
+    final firstN = math.max(0, g.first - ctx), lastN = math.min(n - 1, g.last + ctx);
+    var s = r.normToFull[firstN], e = r.normToFull[lastN] + 1;
+    for (int k = 0; k < spanS.length; k++) {
+      if (spanS[k] < s && s < spanE[k]) s = spanS[k];
+      if (spanS[k] < e && e < spanE[k]) e = spanE[k];
+    }
+    var text = r.target.substring(s, e);
+    s += text.length - text.trimLeft().length;
+    text = text.trim();
+    if (text.isEmpty) continue;
+    final h = <int>{}, so = <int>{};
+    for (final i in hard) {
+      final f = r.normToFull[i];
+      if (f >= s && f < s + text.length) h.add(f - s);
+    }
+    for (final i in soft) {
+      final f = r.normToFull[i];
+      if (f >= s && f < s + text.length) so.add(f - s);
+    }
+    notes.add(_TypoNote(text, h, so));
+  }
+
+  // 틀린 곳이 들어 있던 어절 / 약어
+  final errFull = <int>[...hard.map((i) => r.normToFull[i]), ...soft.map((i) => r.normToFull[i])]..sort();
+  final wr = RegExp(r'\S+').allMatches(r.target).toList();
+  final words = <String>{}, hit = <String>{};
+  int wi = 0, si = 0;
+  for (final f in errFull) {
+    while (wi < wr.length && wr[wi].end <= f) { wi++; }
+    if (wi < wr.length && wr[wi].start <= f) {
+      final w = _wordCore(wr[wi].group(0)!);
+      if (w.isNotEmpty) words.add(w);
+    }
+    while (si < spanE.length && spanE[si] <= f) { si++; }
+    if (si < spanE.length && spanS[si] <= f) hit.add(spanA[si]);
+  }
+  return _TypoAnalysis(notes, words, hit, errors);
+}
+
+// 오타장 문장을 글자별로 색칠 (빨강 = 오자·탈자, 주황 = 첨자)
+List<InlineSpan> _typoSpans(_TypoNote n) {
+  const base = TextStyle(fontSize: 15, height: 1.7, color: Colors.black87);
+  final spans = <InlineSpan>[];
+  final buf = StringBuffer();
+  int cur = 0; // 0 보통 / 1 오자·탈자 / 2 첨자
+  void flush() {
+    if (buf.isEmpty) return;
+    TextStyle st = base;
+    if (cur == 1) {
+      st = base.copyWith(color: _kTalColor, fontWeight: FontWeight.w800, backgroundColor: const Color(0x22E53935));
+    } else if (cur == 2) {
+      st = base.copyWith(color: const Color(0xFFE65100), fontWeight: FontWeight.w800, backgroundColor: const Color(0x33FF9800));
+    }
+    spans.add(TextSpan(text: buf.toString(), style: st));
+    buf.clear();
+  }
+  for (int i = 0; i < n.text.length; i++) {
+    final k = n.hard.contains(i) ? 1 : (n.soft.contains(i) ? 2 : 0);
+    if (k != cur) { flush(); cur = k; }
+    buf.write(n.text[i]);
+  }
+  flush();
+  return spans;
+}
+
+class _SentFreq {
+  final String label;
+  int runs = 0, errors = 0;
+  _SentFreq(this.label);
+}
+
+// 스프린트에서 자주 틀리는 문장 · 단어(어절) · 약어
+class FrequentErrorsScreen extends StatefulWidget {
+  const FrequentErrorsScreen({super.key});
+  @override State<FrequentErrorsScreen> createState() => _FrequentErrorsScreenState();
+}
+
+class _FrequentErrorsScreenState extends State<FrequentErrorsScreen> {
+  int _days = 30; // 0 = 전체
+
+  Widget _chip(String label, int n) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+    decoration: BoxDecoration(
+      color: n >= 2 ? const Color(0xFFFFE9E5) : const Color(0xFFF4F4F8),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(color: n >= 2 ? const Color(0xFFFFB4A8) : const Color(0xFFE6E6EE))),
+    child: Text('$label  ×$n', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+        color: n >= 2 ? const Color(0xFFC62828) : Colors.black54)));
+
+  Widget _section(String title, String sub, Widget body, {List<Widget> actions = const []}) => Container(
+    width: double.infinity, margin: const EdgeInsets.only(bottom: 14), padding: const EdgeInsets.all(16),
+    decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFEEF0F8))),
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+        const Spacer(),
+        ...actions,
+      ]),
+      const SizedBox(height: 2),
+      Text(sub, style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 10),
+      body,
+    ]));
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = Store.getSprintErrors(days: _days);
+    final sent = <String, _SentFreq>{};
+    final words = <String, int>{}, abbrs = <String, int>{};
+    for (final m in entries) {
+      final h = m['h'] as String;
+      final f = sent.putIfAbsent(h, () => _SentFreq(m['label'] as String? ?? ''));
+      f.runs++;
+      f.errors += ((m['n'] as num?) ?? 0).toInt();
+      for (final x in (m['w'] as List? ?? const [])) { final k = x as String; words[k] = (words[k] ?? 0) + 1; }
+      for (final x in (m['a'] as List? ?? const [])) { final k = x as String; abbrs[k] = (abbrs[k] ?? 0) + 1; }
+    }
+    final sentList = sent.values.toList()
+      ..sort((a, b) => b.runs != a.runs ? b.runs.compareTo(a.runs) : b.errors.compareTo(a.errors));
+    final wordList = words.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final abbrList = abbrs.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final topWords = wordList.take(24).toList();
+    final topAbbrs = abbrList.take(24).toList();
+
+    return Scaffold(backgroundColor: Colors.white,
+      appBar: AppBar(backgroundColor: Colors.white, elevation: 0,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios_rounded, color: kBlue),
+            onPressed: () => Navigator.pop(context)),
+        title: const Text('자주 틀리는 것', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18))),
+      body: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            _PB(label: '7일', value: '7', sel: '$_days', onTap: (v) => setState(() => _days = int.parse(v))),
+            const SizedBox(width: 6),
+            _PB(label: '30일', value: '30', sel: '$_days', onTap: (v) => setState(() => _days = int.parse(v))),
+            const SizedBox(width: 6),
+            _PB(label: '전체', value: '0', sel: '$_days', onTap: (v) => setState(() => _days = int.parse(v))),
+          ]),
+          const SizedBox(height: 10),
+          Container(width: double.infinity, padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(12)),
+            child: const Text('스프린트를 끝낼 때마다 틀린 곳이 쌓여요. 같은 것을 몇 번의 스프린트에서 틀렸는지를 세고, '
+                '2번 이상은 빨간색으로 보여줘요. (이번 업데이트 이후 기록부터)',
+                style: TextStyle(fontSize: 11, color: kBlueDark, height: 1.5))),
+          const SizedBox(height: 14),
+          if (entries.isEmpty)
+            const Padding(padding: EdgeInsets.symmetric(vertical: 40),
+              child: Center(child: Text('아직 기록이 없어요.\n스프린트를 하고 나면 여기에 쌓여요.',
+                  textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 14, height: 1.6))))
+          else ...[
+            _section('자주 틀리는 문장', '같은 문장을 틀린 스프린트 횟수',
+              Column(children: [
+                for (final f in sentList.take(10))
+                  Padding(padding: const EdgeInsets.symmetric(vertical: 4), child: Row(children: [
+                    Expanded(child: Text(f.label, maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
+                    const SizedBox(width: 8),
+                    Text('${f.runs}번 · 오류 ${f.errors}개',
+                        style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800,
+                            color: f.runs >= 2 ? const Color(0xFFC62828) : Colors.black54)),
+                  ])),
+              ])),
+            _section('자주 틀리는 단어', '틀린 곳이 들어 있던 어절', 
+              topWords.isEmpty
+                ? const Text('기록이 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey))
+                : Wrap(spacing: 6, runSpacing: 6, children: topWords.map((e) => _chip(e.key, e.value)).toList()),
+              actions: [
+                if (topWords.isNotEmpty) GestureDetector(
+                  onTap: () {
+                    Clipboard.setData(ClipboardData(text: topWords.map((e) => e.key).join(', ')));
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                        content: Text('단어 목록을 복사했어요'), backgroundColor: kBlue, duration: Duration(seconds: 1)));
+                  },
+                  child: _actionChip(Icons.copy, '복사', Colors.grey)),
+              ]),
+            _section('자주 틀리는 약어', '틀린 곳이 약어 안에 있던 경우',
+              topAbbrs.isEmpty
+                ? const Text('기록이 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey))
+                : Wrap(spacing: 6, runSpacing: 6, children: topAbbrs.map((e) => _chip(e.key, e.value)).toList()),
+              actions: [
+                if (topAbbrs.isNotEmpty) GestureDetector(
+                  onTap: () {
+                    final byText = <String, AbbreviationModel>{};
+                    for (final a in Store.getAbbreviations()) { byText.putIfAbsent(a.quizText, () => a); }
+                    final items = <AbbreviationModel>[
+                      for (final e in topAbbrs) if (byText[e.key] != null) byText[e.key]!,
+                    ];
+                    if (items.isEmpty) return;
+                    kQuizPreset.value = items;
+                    kTabRequest.value = 4;
+                    Navigator.pop(context);
+                  },
+                  child: _actionChip(Icons.quiz_rounded, '테스트', kBlue)),
+              ]),
+          ],
+        ])));
+  }
+}
+
 // ── 스프린트(타이핑 연습) 화면 ──────────────────────────────────────────────────────────
 // 타율(정확도)과 속도를 연습하는 곳.
 // - 저장된 문장을 여러 개 골라 순서대로 연습 (Enter: 다음 문장 / 마지막 문장에서 Enter: 결과)
@@ -6404,6 +6799,62 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   List<AbbreviationModel>? _abbrCache;
   List<int> _abbrKind = [], _abbrSeg = []; // 글자별: 약어 종류(1 일반/2 합성/3 동시) · 약어 조각 번호
 
+  // 자주 틀린 곳 표시 (켜고 끌 수 있음): 최근 30일 안에 2번 이상 틀린 단어·약어에 주황 배경
+  bool _showHot = Hive.box('settings').get('sprint_hot', defaultValue: false) as bool;
+  Set<String> _hotWords = {}, _hotAbbrs = {};
+  List<bool> _hotMark = [];
+
+  // 오타장 (틀린 부분 앞뒤 10글자 문장)
+  final List<_TypoNote> _typoNotes = [];
+  bool _typoShowAll = false, _typoSaved = false;
+
+  void _loadHot() {
+    final h = Store.sprintHot();
+    _hotWords = h['w']!;
+    _hotAbbrs = h['a']!;
+  }
+
+  void _computeHot() {
+    if (!_showHot || _target.isEmpty || (_hotWords.isEmpty && _hotAbbrs.isEmpty)) { _hotMark = []; return; }
+    final mark = List<bool>.filled(_target.length, false);
+    for (final m in RegExp(r'\S+').allMatches(_target)) {
+      if (_hotWords.contains(_wordCore(m.group(0)!))) {
+        for (int k = m.start; k < m.end; k++) { mark[k] = true; }
+      }
+    }
+    if (_hotAbbrs.isNotEmpty) {
+      _abbrCache ??= Store.getAbbreviations();
+      int pos = 0;
+      for (final p in analyzeText(_target, _abbrCache!)) {
+        final a = p.abbr;
+        if (a != null && _hotAbbrs.contains(a.quizText)) {
+          for (int k = 0; k < p.text.length && pos + k < mark.length; k++) { mark[pos + k] = true; }
+        }
+        pos += p.text.length;
+      }
+    }
+    _hotMark = mark;
+  }
+
+  void _toggleHot() {
+    setState(() { _showHot = !_showHot; _computeHot(); });
+    Hive.box('settings').put('sprint_hot', _showHot);
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && !_finished) _inputFocus.requestFocus(); });
+  }
+
+  Widget _hotToggleChip() => GestureDetector(onTap: _toggleHot,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(color: _showHot ? const Color(0xFFFF9800) : const Color(0xFFFFF3E0),
+          borderRadius: BorderRadius.circular(20)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(Icons.flag_rounded, size: 15, color: _showHot ? Colors.white : const Color(0xFFE65100)),
+        const SizedBox(width: 4),
+        Text(_showHot ? '자주 틀린 곳 끄기' : '자주 틀린 곳 표시',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700,
+                color: _showHot ? Colors.white : const Color(0xFFE65100))),
+      ])));
+
   void _computeAbbr() {
     if (!_showAbbr || _target.isEmpty) { _abbrKind = []; _abbrSeg = []; return; }
     _abbrCache ??= Store.getAbbreviations();
@@ -6439,10 +6890,11 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
 
   void _startRun(List<String> items) {
     _abbrCache = null; // 약어를 새로 등록했을 수 있으니 시작할 때마다 다시 읽음
+    _loadHot();
     _timer?.cancel();
     _ticker.stop();
     setState(() {
-      _sentenceResults.clear();
+      _sentenceResults.clear(); _typoNotes.clear();
       _queue = items; _idx = 0;
       _started = true; _finished = false; _stoppedEarly = false; _savedToHome = false;
       _elapsedSec = 0; _sprintMs = 0;
@@ -6474,6 +6926,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     _scrollTarget = 0;
     if (_sentenceScroll.hasClients) _sentenceScroll.jumpTo(0);
     _computeAbbr();
+    _computeHot();
   }
 
   // ── 끝내기 / 중단 / 처음으로 ──
@@ -6483,6 +6936,17 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
     _timer?.cancel();
     _ticker.stop();
     _sprintMs = TypingTracker.sprint.activeMs;
+    // 오타장 문장을 만들고, 틀린 문장·단어·약어를 기록 (자주 틀리는 것 집계용)
+    _typoNotes.clear(); _typoShowAll = false; _typoSaved = false;
+    final abbrList = Store.getAbbreviations();
+    for (final r in _sentenceResults) {
+      final a = _analyzeTypos(r, abbrList);
+      _typoNotes.addAll(a.notes);
+      if (a.errors > 0) {
+        Store.logSprintErrors(hash: sprintHash(r.target), label: _shortLabel(r.target), errors: a.errors,
+            words: a.words.toList(), abbrs: a.abbrs.toList());
+      }
+    }
     setState(() {
       _finished = true; _stoppedEarly = stopped; _savedToHome = false;
       _resultShownAt = DateTime.now();
@@ -6517,7 +6981,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       _elapsedSec = 0; _sprintMs = 0;
       _accOja = 0; _accChum = 0; _accTal = 0; _accTyped = 0; _doneCount = 0;
       _ojaCnt = 0; _chumCnt = 0; _talCnt = 0; _totalTyped = 0;
-      _sentenceResults.clear();
+      _sentenceResults.clear(); _typoNotes.clear();
     });
   }
 
@@ -6773,10 +7237,11 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
   List<TextSpan> _buildColoredText() {
     final spans = <TextSpan>[];
     final buf = StringBuffer();
-    Color? cur; int curKind = 0, curSeg = 0;
+    Color? cur; int curKind = 0, curSeg = 0; bool curHot = false;
     void flush() {
       if (buf.isEmpty) return;
       TextStyle st = _baseStyle.copyWith(color: cur ?? Colors.grey.shade400);
+      if (curHot) st = st.copyWith(backgroundColor: const Color(0x55FFB74D));
       if (curKind != 0) {
         final uc = curKind == 2 ? kBlueSky : curKind == 3 ? kPurple : kBlue;
         st = st.copyWith(decoration: TextDecoration.underline, decorationThickness: 2.5,
@@ -6797,7 +7262,8 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       else { color = Colors.grey.shade400; }
       final kind = (_showAbbr && k < _abbrKind.length) ? _abbrKind[k] : 0;
       final seg = (_showAbbr && k < _abbrSeg.length) ? _abbrSeg[k] : 0;
-      if (cur != color || curKind != kind || curSeg != seg) { flush(); cur = color; curKind = kind; curSeg = seg; }
+      final hot = (_showHot && k < _hotMark.length) ? _hotMark[k] : false;
+      if (cur != color || curKind != kind || curSeg != seg || curHot != hot) { flush(); cur = color; curKind = kind; curSeg = seg; curHot = hot; }
       buf.write(ch);
       normIdx++;
     }
@@ -6926,28 +7392,34 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
                 decoration: BoxDecoration(color: const Color(0xFFF8F8F8), borderRadius: BorderRadius.circular(12)),
                 child: RichText(text: TextSpan(children: _buildColoredText()))),
             const SizedBox(height: 12),
-            if (!_finished) _buildInput(expand: false) else _buildResult(),
+            if (!_finished) _buildInput(expand: false) else ...[
+              _buildResult(),
+              const SizedBox(height: 12),
+              _buildTypoCard(),
+            ],
           ]));
       })));
   }
 
-  Widget _buildHeader() => Row(children: [
-    const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
-    const Spacer(),
-    if (!_finished) ...[_abbrToggleChip(), const SizedBox(width: 8)],
-    if (!_finished) ...[
-      GestureDetector(onTap: _stop,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(20)),
-          child: const Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.stop_rounded, size: 16, color: Colors.red),
-            SizedBox(width: 4),
-            Text('중단 (Esc)', style: TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.w700)),
-          ]))),
-      const SizedBox(width: 8),
-    ],
-    GestureDetector(onTap: _reset, child: _iconToolBtn(Icons.refresh_rounded)),
+  Widget _buildHeader() => Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    const Padding(padding: EdgeInsets.only(top: 6),
+      child: Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900))),
+    const SizedBox(width: 10),
+    Expanded(child: Wrap(alignment: WrapAlignment.end, spacing: 8, runSpacing: 6, children: [
+      if (!_finished) _abbrToggleChip(),
+      if (!_finished) _hotToggleChip(),
+      if (!_finished)
+        GestureDetector(onTap: _stop,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            decoration: BoxDecoration(color: const Color(0xFFFFEEEE), borderRadius: BorderRadius.circular(20)),
+            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.stop_rounded, size: 16, color: Colors.red),
+              SizedBox(width: 4),
+              Text('중단 (Esc)', style: TextStyle(fontSize: 12, color: Colors.red, fontWeight: FontWeight.w700)),
+            ]))),
+      GestureDetector(onTap: _reset, child: _iconToolBtn(Icons.refresh_rounded)),
+    ])),
   ]);
 
   Widget _buildStats() {
@@ -6991,6 +7463,92 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
             borderSide: const BorderSide(color: kBlue))),
       style: const TextStyle(fontSize: 16)));
+
+  // 오타장: 틀린 부분 앞뒤 10글자 문장 모음
+  Widget _buildTypoCard() {
+    final total = _typoNotes.length;
+    final shownCount = _typoShowAll ? total : math.min(total, 15);
+    return Container(width: double.infinity, padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: const Color(0xFFFFE0B0))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.edit_note_rounded, size: 20, color: Color(0xFFE65100)),
+          const SizedBox(width: 6),
+          Expanded(child: Text(total == 0 ? '오타장' : '오타장 문장 ($total개)',
+              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900))),
+          GestureDetector(
+            onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FrequentErrorsScreen())),
+            child: _actionChip(Icons.insights_rounded, '자주 틀리는 것', kPurple)),
+        ]),
+        const SizedBox(height: 4),
+        const Text('틀린 부분의 앞뒤 10글자 (약어가 걸치면 약어는 통째로) · 빨강 = 오자·탈자, 주황 = 첨자',
+            style: TextStyle(fontSize: 11, color: Colors.grey, height: 1.4)),
+        const SizedBox(height: 10),
+        if (total == 0)
+          const Text('틀린 곳이 없어요!', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: Colors.green))
+        else ...[
+          for (int i = 0; i < shownCount; i++)
+            Container(width: double.infinity, margin: const EdgeInsets.only(bottom: 8), padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: const Color(0xFFF8F8F8), borderRadius: BorderRadius.circular(10)),
+              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Padding(padding: const EdgeInsets.only(top: 3),
+                  child: Text('${i + 1}', style: const TextStyle(fontSize: 11, color: Colors.grey, fontWeight: FontWeight.w800))),
+                const SizedBox(width: 8),
+                Expanded(child: SelectableText.rich(TextSpan(children: _typoSpans(_typoNotes[i])))),
+              ])),
+          if (total > shownCount)
+            GestureDetector(onTap: () => setState(() => _typoShowAll = true),
+              child: Padding(padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Text('나머지 ${total - shownCount}개 더 보기',
+                    style: const TextStyle(fontSize: 12, color: kBlue, fontWeight: FontWeight.w700)))),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            ElevatedButton.icon(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: _typoNotes.map((n) => n.text).join('\n')));
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                    content: Text('오타장 문장을 복사했어요'), backgroundColor: kBlue, duration: Duration(seconds: 1)));
+              },
+              icon: const Icon(Icons.copy_rounded, size: 16),
+              label: const Text('복사', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(backgroundColor: kBlueSky, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)))),
+            ElevatedButton.icon(
+              onPressed: _typoSaved ? null : _saveTypoNotes,
+              icon: Icon(_typoSaved ? Icons.check_rounded : Icons.folder_rounded, size: 16),
+              label: Text(_typoSaved ? '저장했어요' : '문장으로 저장',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)))),
+          ]),
+        ],
+      ]));
+  }
+
+  // 오타장 문장을 저장된 문장으로 등록 ("오타장 11/27" 그룹에 담아서 바로 스프린트로 연습할 수 있게)
+  Future<void> _saveTypoNotes() async {
+    if (_typoNotes.isEmpty || _typoSaved) return;
+    final now = DateTime.now();
+    final name = '오타장 ${now.month}/${now.day}';
+    final groups = Store.getSentenceGroups();
+    String? gid;
+    for (final g in groups) { if (g['name'] == name) gid = g['id'] as String; }
+    gid ??= await Store.addSentenceGroup(name, kGroupColors[groups.length % kGroupColors.length].value);
+    final base = now.millisecondsSinceEpoch;
+    final ids = <String>[];
+    for (int i = 0; i < _typoNotes.length; i++) {
+      final id = '${base + i}';
+      ids.add(id);
+      await Store.saveSentence(SavedSentenceModel(id: id, text: _typoNotes[i].text, createdAt: _ymd(now)));
+    }
+    await Store.addSentencesToGroup(ids, gid);
+    if (!mounted) return;
+    setState(() => _typoSaved = true);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('$name 그룹에 문장 ${ids.length}개를 저장했어요'),
+        backgroundColor: kBlue, duration: const Duration(seconds: 2)));
+  }
 
   Widget _buildResult() => Focus(
     focusNode: _resultFocus,
@@ -7057,6 +7615,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
       if (q.isNotEmpty && !s.text.contains(q)) return false;
       return true;
     }).toList();
+    final freq = Store.sprintSentenceCounts();
     final list = shown.isEmpty
         ? const Center(child: Text('해당하는 문장이 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey)))
         : ListView.builder(itemCount: shown.length,
@@ -7064,6 +7623,7 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
               final s = shown[i];
               final order = _selectedIds.indexOf(s.id);
               final isSel = order >= 0;
+              final wrongCnt = freq[sprintHash(s.text.trim())] ?? 0;
               final tags = groups.where((g) => (assign[s.id] ?? const <String>[]).contains(g['id'])).toList();
               return GestureDetector(
                 onTap: () => setState(() {
@@ -7087,6 +7647,9 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
                     Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       _ClampedText(text: s.text, maxLines: 9,
                           style: const TextStyle(fontSize: 13, height: 1.5)),
+                      if (wrongCnt > 0) Padding(padding: const EdgeInsets.only(top: 4),
+                        child: Text('최근 30일 $wrongCnt번 틀림',
+                            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800, color: Color(0xFFE65100)))),
                       if (tags.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 4),
                         child: Wrap(spacing: 4, runSpacing: 4, children: tags.map((g) => Container(
                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
@@ -7106,7 +7669,13 @@ class _TypingPracticeScreenState extends State<TypingPracticeScreen> with Single
             padding: const EdgeInsets.symmetric(vertical: 14),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))));
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+      Row(children: [
+        const Text('스프린트', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w900)),
+        const Spacer(),
+        GestureDetector(
+          onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const FrequentErrorsScreen())),
+          child: _actionChip(Icons.insights_rounded, '자주 틀리는 것', kPurple)),
+      ]),
       const SizedBox(height: 16),
       // 문장 직접 입력 (입력하면 맨 앞 문장으로 들어감)
       _lbl('연습할 문장'),
