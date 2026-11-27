@@ -17,6 +17,7 @@ void main() async {
   await Hive.openBox('groups');
   await Hive.openBox('settings'); // 추가
   await Hive.openBox('quizWrongLog'); // 테스트 오답 기록(역대 통계용)
+  await Hive.openBox('quizAttempts'); // 약어 테스트 출제·정오 기록 (취약점 오답률용)
   await Hive.openBox('typingSessions'); // 순공시간(타이핑) 세션 기록
   TtsController.instance._init(); // Hive 열린 후 설정 로드
   await TypingTracker.instance.init(); // 지난 실행에서 저장 못 한 세션 복구
@@ -358,6 +359,37 @@ class ReminderModel {
     id: m['id'] as String, type: m['type'] as String, target: m['target'] as String,
     date: m['date'] as String, intervalDays: m['intervalDays'] as int? ?? 1,
     repeat: m['repeat'] as bool? ?? false, active: m['active'] as bool? ?? true);
+}
+
+// ── 취약점 분석(운지 기준) 공용 ──────────────────────────────────────────────
+// 키 id = '종류:글자' (종류: cho 초성 / jung 중성 / jong 종성)
+String weakKeyId(String type, String label) => '$type:$label';
+
+// 약어에 등록해 둔 운지(초·중·종성 키) 목록. 단어의 글자가 아니라 실제로 누르는 키 기준.
+List<String> abbrWeakKeys(AbbreviationModel a) {
+  final out = <String>[];
+  for (final c in a.initial) { final t = c.trim(); if (t.isNotEmpty) out.add(weakKeyId('cho', t)); }
+  for (final c in a.medial) { final t = c.trim(); if (t.isNotEmpty) out.add(weakKeyId('jung', t)); }
+  for (final c in a.final_) {
+    var t = c.trim();
+    if (t.isEmpty) continue;
+    if (t == 'ㅋ') t = '(ㅋ)';
+    out.add(weakKeyId('jong', t));
+  }
+  return out;
+}
+
+class KeyWeakStat {
+  int attempts = 0, wrong = 0;
+  double get rate => attempts == 0 ? 0.0 : wrong / attempts;
+}
+
+class KeyWeakResult {
+  final Map<String, KeyWeakStat> stats; // 키 id → 출제/오답 수
+  final bool rateMode;                  // true: 출제 대비 오답률 / false: 오답 횟수
+  final int totalAttempts;              // 이 기간 약어 테스트 출제 수
+  final Map<String, int> wrongByText;   // 약어 → 이 기간 틀린 횟수
+  KeyWeakResult(this.stats, this.rateMode, this.totalAttempts, this.wrongByText);
 }
 
 class Store {
@@ -708,6 +740,58 @@ class Store {
   // 테스트에서 틀렸을 때 항목 전체 텍스트를 기록 (역대 오답 통계용)
   static Future<void> logQuizWrong(String text) =>
       _qw.add({'text': text, 'ts': DateTime.now().toIso8601String()});
+
+  // 약어 테스트에서 문제를 낼 때마다 정답/오답을 기록 (취약점 분석의 '출제 대비 오답률'용)
+  static Future<void> logQuizAttempt(String text, bool ok) =>
+      Hive.box('quizAttempts').add({'t': text, 'ts': DateTime.now().toIso8601String(), 'ok': ok});
+
+  // 취약점 분석: 약어에 등록한 운지(초·중·종성 키) 기준으로 키별 출제/오답 수를 센다.
+  // 출제 기록이 30문제 이상이면 오답률, 아직 적으면 예전 오답 기록으로 오답 횟수를 센다.
+  static KeyWeakResult analyzeKeyWeakness({required DateTime from, required DateTime to,
+      List<AbbreviationModel>? abbrs, bool? forceRate}) {
+    final byText = <String, AbbreviationModel>{};
+    for (final a in (abbrs ?? getAbbreviations())) { byText.putIfAbsent(a.quizText, () => a); }
+    final attempts = <String, int>{}, wrongA = <String, int>{};
+    var total = 0;
+    for (final e in Hive.box('quizAttempts').values) {
+      final m = Map.from(e as Map);
+      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+      if (ts == null || ts.isBefore(from) || !ts.isBefore(to)) continue;
+      final t = m['t'] as String;
+      attempts[t] = (attempts[t] ?? 0) + 1;
+      total++;
+      if (m['ok'] != true) wrongA[t] = (wrongA[t] ?? 0) + 1;
+    }
+    final rateMode = forceRate ?? (total >= 30);
+    final wrongByText = <String, int>{};
+    if (rateMode) {
+      wrongByText.addAll(wrongA);
+    } else {
+      for (final e in _qw.values) {
+        final m = Map.from(e as Map);
+        final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+        if (ts == null || ts.isBefore(from) || !ts.isBefore(to)) continue;
+        final t = m['text'] as String;
+        wrongByText[t] = (wrongByText[t] ?? 0) + 1;
+      }
+    }
+    final stats = <String, KeyWeakStat>{};
+    void add(String text, int att, int wr) {
+      final a = byText[text];
+      if (a == null) return;
+      for (final k in abbrWeakKeys(a)) {
+        final s = stats.putIfAbsent(k, () => KeyWeakStat());
+        s.attempts += att;
+        s.wrong += wr;
+      }
+    }
+    if (rateMode) {
+      attempts.forEach((t, n) => add(t, n, wrongA[t] ?? 0));
+    } else {
+      wrongByText.forEach((t, n) => add(t, 0, n));
+    }
+    return KeyWeakResult(stats, rateMode, total, wrongByText);
+  }
   // 최근 N일간 틀린 횟수를 항목(전체 텍스트) 단위로 집계
   static Map<String, int> getRecentWrongCounts({int days = 7}) {
     final cutoff = DateTime.now().subtract(Duration(days: days));
@@ -2657,114 +2741,612 @@ class _Div extends StatelessWidget {
   @override Widget build(BuildContext context) => Container(width: 1, height: 28, color: const Color(0xFFC8D8F8));
 }
 
+// ── 성장 기록 (진도 로드맵 · 타수 추이 · 공부시간 · 순공시간) ─────────────────────
+// 목표 타수 = 진도(자수) × 2.8 을 5타 단위로 반올림 (예: 170 → 475타, 180 → 505타)
+const double kTasuMul = 2.8;
+const int kTasuRound = 5;
+const int kStageStep = 10; // 진도는 10자 단위로 올라감
+int targetTasuFor(int chars) => ((chars * kTasuMul) / kTasuRound).round() * kTasuRound;
+
+// 분 → "4시간 22분" / "35분"
+String _fmtMinutes(num minutes) {
+  final m = minutes.round();
+  if (m <= 0) return '0분';
+  final h = m ~/ 60, r = m % 60;
+  if (h == 0) return '$r분';
+  if (r == 0) return '$h시간';
+  return '$h시간 $r분';
+}
+
+// 초 → "2분 05초" / "40초"
+String _fmtSpan(int sec) {
+  final m = sec ~/ 60, s = sec % 60;
+  if (m == 0) return '$s초';
+  return '$m분 ${s.toString().padLeft(2, '0')}초';
+}
+
+String _fmtDot(DateTime d) =>
+    '${d.year}.${d.month.toString().padLeft(2, '0')}.${d.day.toString().padLeft(2, '0')}';
+
+// 글자 그리기 도우미 (anchor: l 왼쪽 시작 / r 오른쪽 끝 / c 가운데, 세로는 항상 가운데)
+void _drawText(Canvas c, String s, Offset p,
+    {double fs = 10, Color color = Colors.grey, FontWeight fw = FontWeight.w600, String anchor = 'c'}) {
+  final tp = TextPainter(
+    text: TextSpan(text: s, style: TextStyle(fontSize: fs, color: color, fontWeight: fw)),
+    textDirection: TextDirection.ltr)..layout();
+  double dx = p.dx;
+  if (anchor == 'r') { dx -= tp.width; }
+  else if (anchor == 'c') { dx -= tp.width / 2; }
+  tp.paint(c, Offset(dx, p.dy - tp.height / 2));
+}
+
+// 가로 점선
+void _dashedH(Canvas c, double x0, double x1, double y, Paint p, {double dash = 6, double gap = 4}) {
+  double x = x0;
+  while (x < x1) {
+    c.drawLine(Offset(x, y), Offset(math.min(x + dash, x1), y), p);
+    x += dash + gap;
+  }
+}
+
+// 진도 한 단계 (같은 진도가 이어진 기간)
+class _Stage {
+  final int value;
+  final DateTime start;
+  DateTime end;
+  _Stage(this.value, this.start, this.end);
+}
+
+class _BarItem {
+  final String label, tip;
+  final double? value;
+  const _BarItem(this.label, this.tip, this.value);
+}
+
+class _HLine {
+  final double value;
+  final String label;
+  final Color color;
+  const _HLine(this.value, this.label, this.color);
+}
+
 class GraphScreen extends StatefulWidget {
   const GraphScreen({super.key});
   @override State<GraphScreen> createState() => _GraphScreenState();
 }
+
 class _GraphScreenState extends State<GraphScreen> {
-  String _period = 'week', _filter = 'wpm';
-  // 순공시간(분): 1주 = 요일별 합계, 1달 = 6일 단위 합계, 1년 = 월별 합계
-  List<_BD> _typingData() {
-    final sessions = TypingStore.all(); final now = DateTime.now();
-    double minutesWhere(bool Function(TypingSession) test) =>
-        sessions.where(test).fold<int>(0, (a, s) => a + s.activeMs) / 60000.0;
-    String key(DateTime d) => _ymd(d);
-    if (_period == 'week') {
-      final mon = now.subtract(Duration(days: now.weekday - 1)); const days = ['월','화','수','목','금','토','일'];
-      return List.generate(7, (i) {
-        final k = key(mon.add(Duration(days: i)));
-        final v = minutesWhere((s) => s.date == k);
-        return _BD(label: days[i], value: v > 0 ? v : null);
-      });
-    } else if (_period == 'month') {
-      return [[1,6],[7,12],[13,18],[19,24],[25,31]].map((r) {
-        final v = minutesWhere((s) {
-          final p = s.date.split('-');
-          final d = int.parse(p[2]);
-          return int.parse(p[0]) == now.year && int.parse(p[1]) == now.month && d >= r[0] && d <= r[1];
-        });
-        return _BD(label: '${r[0]}~${r[1]}일', value: v > 0 ? v : null);
-      }).toList();
+  String _tab = 'speech';   // speech 연설 진도 / essay 논술 진도 / study 공부시간 / typing 순공시간
+  String _period = 'week';  // 시간 그래프: week / month / year
+  int _trendDays = 90;      // 타수 추이 기간 (0 = 전체)
+  int? _selBar;             // 시간 그래프에서 누른 막대
+
+  DateTime get _today => DateTime.tryParse(StudyTimer.instance.todayKey) ?? DateTime.now();
+
+  void _setTab(String v) => setState(() { _tab = v; _selBar = null; });
+
+  // 날짜별 그날의 최고 타수: 홈 기록의 타수 칸 + 스프린트 채점 타수 중 큰 값
+  Map<String, int> _bestTasuByDate() {
+    final m = <String, int>{};
+    for (final r in Store.getRecords()) {
+      final w = r.wpm;
+      if (w != null && w > 0) m[r.date] = w;
     }
-    return List.generate(12, (i) {
-      final v = minutesWhere((s) {
-        final p = s.date.split('-');
-        return int.parse(p[0]) == now.year && int.parse(p[1]) == i + 1;
-      });
-      return _BD(label: '${i + 1}월', value: v > 0 ? v : null);
-    });
-  }
-  List<_BD> _getData() {
-    if (_filter == 'typing') return _typingData();
-    final recs = Store.getRecordsWithData(); final now = DateTime.now();
-    double? val(StudyRecordModel r) { switch (_filter) {
-      case 'wpm': return r.wpm?.toDouble(); case 'speech': return r.speechChars?.toDouble();
-      case 'essay': return r.essayChars?.toDouble();
-      case 'time': final t=(r.studyHours??0)*60+(r.studyMinutes??0); return t>0?t.toDouble():null;
-      default: return null; } }
-    if (_period == 'week') {
-      final mon=now.subtract(Duration(days:now.weekday-1)); final days=['월','화','수','목','금','토','일'];
-      return List.generate(7,(i){ final d=mon.add(Duration(days:i));
-        final k=_ymd(d);
-        try{return _BD(label:days[i],value:val(recs.firstWhere((r)=>r.date==k)));}
-        catch(_){return _BD(label:days[i],value:null);}});
-    } else if (_period=='month') {
-      return [[1,6],[7,12],[13,18],[19,24],[25,30],[31,31]].map((r){
-        final vals=<double>[];
-        for(int d=r[0];d<=r[1];d++){ final k='${now.year}-${now.month.toString().padLeft(2,'0')}-${d.toString().padLeft(2,'0')}';
-          try{final v=val(recs.firstWhere((r)=>r.date==k));if(v!=null)vals.add(v);}catch(_){}}
-        return _BD(label:'${r[0]}~${r[1]}일',value:vals.isEmpty?null:vals.reduce((a,b)=>a+b)/vals.length);
-      }).toList();
-    } else {
-      return [['1~3월',[1,2,3]],['4~6월',[4,5,6]],['7~9월',[7,8,9]],['10~12월',[10,11,12]]].map((q){
-        final months=q[1] as List<int>;
-        final vals=recs.where((r)=>months.contains(int.parse(r.date.split('-')[1]))).map(val).where((v)=>v!=null).map((v)=>v!).toList();
-        return _BD(label:q[0] as String,value:vals.isEmpty?null:vals.reduce((a,b)=>a+b)/vals.length);
-      }).toList();
+    for (final s in TypingStore.all()) {
+      final t = s.tasu ?? 0;
+      if (t > 0 && t > (m[s.date] ?? 0)) m[s.date] = t;
     }
+    return m;
   }
-  @override Widget build(BuildContext context) {
-    final data=_getData(); final maxVal=data.map((d)=>d.value??0).fold(0.0,(a,b)=>a>b?a:b);
-    final chartMax=maxVal>0?maxVal*1.2:300.0;
+
+  Widget _card({required Widget child, Color color = Colors.white, Color border = const Color(0xFFEEF0F8)}) =>
+    Container(width: double.infinity, margin: const EdgeInsets.only(bottom: 12), padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(16), border: Border.all(color: border)),
+      child: child);
+
+  @override
+  Widget build(BuildContext context) {
+    final isProgress = _tab == 'speech' || _tab == 'essay';
     return Scaffold(backgroundColor: Colors.white,
-      appBar: AppBar(backgroundColor:Colors.white,elevation:0,
-        leading:IconButton(icon:const Icon(Icons.arrow_back_ios_rounded,color:kBlue),onPressed:()=>Navigator.pop(context)),
-        title:const Text('학습 그래프',style:TextStyle(fontWeight:FontWeight.w900,fontSize:18))),
-      body: Padding(padding:const EdgeInsets.all(16),child:Column(children:[
-       Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(children: [
-            _PB(label:'타수',value:'wpm',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
-            _PB(label:'연설',value:'speech',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
-            _PB(label:'논술',value:'essay',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
-            _PB(label:'시간',value:'time',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),const SizedBox(width:6),
-            _PB(label:'순공',value:'typing',sel:_filter,onTap:(v)=>setState(()=>_filter=v)),
+      appBar: AppBar(backgroundColor: Colors.white, elevation: 0,
+        leading: IconButton(icon: const Icon(Icons.arrow_back_ios_rounded, color: kBlue),
+            onPressed: () => Navigator.pop(context)),
+        title: const Text('성장 기록', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18))),
+      body: Column(children: [
+        Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: Align(alignment: Alignment.centerLeft,
+            child: Wrap(spacing: 6, runSpacing: 6, children: [
+              _PB(label: '연설 진도', value: 'speech', sel: _tab, onTap: _setTab),
+              _PB(label: '논술 진도', value: 'essay', sel: _tab, onTap: _setTab),
+              _PB(label: '공부시간', value: 'study', sel: _tab, onTap: _setTab),
+              _PB(label: '순공시간', value: 'typing', sel: _tab, onTap: _setTab),
+            ]))),
+        Expanded(child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 24),
+          child: isProgress ? _progressView(_tab == 'speech') : _timeView())),
+      ]));
+  }
+
+  // ── 진도 로드맵 (연설 / 논술) ──
+  Widget _progressView(bool speech) {
+    final label = speech ? '연설' : '논술';
+    final series = <MapEntry<DateTime, int>>[];
+    final recs = Store.getRecordsWithData()..sort((a, b) => a.date.compareTo(b.date));
+    for (final r in recs) {
+      final v = speech ? r.speechChars : r.essayChars;
+      final d = DateTime.tryParse(r.date);
+      if (v != null && d != null) series.add(MapEntry(d, v));
+    }
+    if (series.isEmpty) {
+      return Padding(padding: const EdgeInsets.only(top: 60),
+        child: Center(child: Text('홈 탭의 기록에 $label 진도를 입력하면\n여기에서 진도 흐름을 볼 수 있어요.',
+            textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey, fontSize: 14, height: 1.6))));
+    }
+    final today = _today;
+
+    // 같은 진도가 이어진 기간 = 한 단계
+    final stages = <_Stage>[];
+    for (final e in series) {
+      if (stages.isEmpty || stages.last.value != e.value) {
+        if (stages.isNotEmpty) stages.last.end = e.key; // 이 날 진도가 바뀜 = 앞 단계를 통과한 날
+        stages.add(_Stage(e.value, e.key, today));
+      }
+    }
+    final cur = stages.last;
+    int daysOf(_Stage s) => identical(s, cur)
+        ? math.max(1, s.end.difference(s.start).inDays + 1)
+        : math.max(1, s.end.difference(s.start).inDays);
+    final curDays = daysOf(cur);
+    final next = cur.value + kStageStep;
+    final curTarget = targetTasuFor(cur.value), nextTarget = targetTasuFor(next);
+
+    // 현재 실력 = 최근 7일 중 최고 타수
+    final best = _bestTasuByDate();
+    final recentVals = <int>[];
+    best.forEach((k, v) {
+      final d = DateTime.tryParse(k);
+      if (d == null) return;
+      final diff = today.difference(d).inDays;
+      if (diff >= 0 && diff < 7) recentVals.add(v);
+    });
+    final int? recent = recentVals.isEmpty ? null : recentVals.reduce(math.max);
+
+    // ① 현재 진도
+    final cardNow = _card(color: kBlueLight, border: const Color(0xFFCFDDF7),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('현재 $label 진도', style: const TextStyle(fontSize: 12, color: kBlueDark)),
+        const SizedBox(height: 4),
+        Wrap(crossAxisAlignment: WrapCrossAlignment.end, spacing: 10, children: [
+          Text('${cur.value}자', style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w900, color: kBlueDark)),
+          Padding(padding: const EdgeInsets.only(bottom: 5),
+            child: Text('$curDays일째 · ${_fmtDot(cur.start)}부터',
+                style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w600))),
+        ]),
+      ]));
+
+    // ② 다음 단계까지
+    final nextChildren = <Widget>[
+      Text('다음 단계 ($next자)까지', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 2),
+      Text('목표 타수 = 진도 × $kTasuMul → $kTasuRound타 단위 반올림',
+          style: const TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 12),
+    ];
+    if (recent == null) {
+      nextChildren.addAll([
+        Text('필요한 타수  $nextTarget타', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900, color: kBlueDark)),
+        const SizedBox(height: 8),
+        const Text('최근 7일 타수 기록이 없어요.\n스프린트를 하면 타수가 자동으로 기록돼요.',
+            style: TextStyle(fontSize: 12, color: Colors.grey, height: 1.5)),
+      ]);
+    } else {
+      final gap = nextTarget - recent;
+      nextChildren.addAll([
+        Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+          Text('$recent타', style: const TextStyle(fontSize: 26, fontWeight: FontWeight.w900, color: kBlueDark)),
+          Text('  / 목표 $nextTarget타', style: const TextStyle(fontSize: 13, color: Colors.grey, fontWeight: FontWeight.w600)),
+          const Spacer(),
+          Text(gap > 0 ? '$gap타 더 필요' : '달성!',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w900,
+                  color: gap > 0 ? const Color(0xFFE65100) : Colors.green.shade700)),
+        ]),
+        const SizedBox(height: 8),
+        _gauge(recent, curTarget, nextTarget),
+        const SizedBox(height: 6),
+        Wrap(spacing: 14, runSpacing: 4, children: [
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 10, height: 10, decoration: BoxDecoration(color: kBlue, borderRadius: BorderRadius.circular(3))),
+            const SizedBox(width: 4),
+            const Text('최근 7일 최고타', style: TextStyle(fontSize: 11, color: Colors.grey)),
           ]),
-          const SizedBox(height:8),
-          Row(children: [
-            _PB(label:'1주',value:'week',sel:_period,onTap:(v)=>setState(()=>_period=v)),const SizedBox(width:6),
-            _PB(label:'1달',value:'month',sel:_period,onTap:(v)=>setState(()=>_period=v)),const SizedBox(width:6),
-            _PB(label:'1년',value:'year',sel:_period,onTap:(v)=>setState(()=>_period=v)),
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Container(width: 3, height: 12, color: kPurple),
+            const SizedBox(width: 4),
+            Text('현재 단계(${cur.value}자) 기준 $curTarget타', style: const TextStyle(fontSize: 11, color: Colors.grey)),
           ]),
         ]),
-        if (_filter == 'typing') Padding(padding: const EdgeInsets.only(top: 12),
-          child: Align(alignment: Alignment.centerLeft,
-            child: Text('이 기간 총 순공시간  ${formatTypingTotal((data.fold<double>(0, (a, d) => a + (d.value ?? 0)) * 60000).round())}   (막대 단위: 분)',
-                style: const TextStyle(fontSize: 12, color: kBlueDark, fontWeight: FontWeight.w700)))),
-        const SizedBox(height:24),
-        Expanded(child:data.every((d)=>d.value==null)?const Center(child:Text('기록이 없습니다',style:TextStyle(color:Colors.grey))):Row(crossAxisAlignment:CrossAxisAlignment.end,children:data.map((d){
-          final ratio=d.value!=null?d.value!/chartMax:0.0;
-          return Expanded(child:Padding(padding:const EdgeInsets.symmetric(horizontal:3),child:Column(mainAxisAlignment:MainAxisAlignment.end,children:[
-            if(d.value!=null)Text(_filter=='typing'?d.value!.toStringAsFixed(1):d.value!.round().toString(),style:const TextStyle(fontSize:10,color:kBlue,fontWeight:FontWeight.w700)),
-            const SizedBox(height:4),
-            Flexible(child:FractionallySizedBox(heightFactor:ratio>0?ratio:0.02,child:Container(decoration:BoxDecoration(color:d.value!=null?kBlue:Colors.grey[300],borderRadius:const BorderRadius.vertical(top:Radius.circular(4)))))),
-            const SizedBox(height:6),
-            Text(d.label,style:const TextStyle(fontSize:10,color:Colors.grey),textAlign:TextAlign.center),
-          ])));
-        }).toList())),
-      ])));
+        const SizedBox(height: 10),
+      ]);
+      if (gap > 0) {
+        final pct = gap / recent * 100;
+        final secNow = 1000 / recent * 60, secNext = 1000 / nextTarget * 60;
+        nextChildren.addAll([
+          Text('지금보다 약 ${pct.toStringAsFixed(1)}% 빨라져야 해요.',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 3),
+          Text('같은 1,000타 분량을 ${_fmtSpan(secNow.round())} → ${_fmtSpan(secNext.round())}로, '
+              '약 ${(secNow - secNext).round()}초 줄이면 돼요.',
+              style: const TextStyle(fontSize: 12, color: Colors.black54, height: 1.5)),
+        ]);
+      } else {
+        nextChildren.add(const Text('다음 단계 기준 타수를 넘었어요. 진도를 올릴 준비가 됐어요!',
+            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700)));
+      }
+      nextChildren.addAll([
+        const SizedBox(height: 3),
+        Text(recent >= curTarget
+            ? '현재 단계(${cur.value}자) 기준 $curTarget타는 이미 넘었어요.'
+            : '현재 단계(${cur.value}자) 기준 $curTarget타도 아직 못 넘었어요.',
+            style: const TextStyle(fontSize: 12, color: Colors.black54)),
+      ]);
+    }
+    final cardNext = _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: nextChildren));
+
+    // ③ 진도 로드맵 (머문 기간에 비례한 띠 + 목록)
+    final shown = stages.length > 8 ? stages.sublist(stages.length - 8) : stages;
+    final band = SizedBox(height: 58, child: Row(children: [
+      for (int i = 0; i < shown.length; i++)
+        Expanded(flex: math.max(daysOf(shown[i]), 5), child: Container(
+          margin: EdgeInsets.only(right: i == shown.length - 1 ? 0 : 3),
+          decoration: BoxDecoration(
+            color: identical(shown[i], cur) ? kBlue : (i.isEven ? const Color(0xFFD6E4FB) : const Color(0xFFBBD2F7)),
+            borderRadius: BorderRadius.circular(8)),
+          child: Center(child: FittedBox(fit: BoxFit.scaleDown, child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Text('${shown[i].value}', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w900,
+                  color: identical(shown[i], cur) ? Colors.white : kBlueDark)),
+              Text('${daysOf(shown[i])}일', style: TextStyle(fontSize: 10,
+                  color: identical(shown[i], cur) ? Colors.white70 : kBlueDark)),
+            ])))))),
+    ]));
+    final stageRows = shown.reversed.map((s) {
+      final isCur = identical(s, cur);
+      return Padding(padding: const EdgeInsets.symmetric(vertical: 3), child: Row(children: [
+        Container(width: 8, height: 8,
+            decoration: BoxDecoration(color: isCur ? kBlue : Colors.grey.shade400, shape: BoxShape.circle)),
+        const SizedBox(width: 8),
+        SizedBox(width: 52, child: Text('${s.value}자', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800))),
+        Expanded(child: Text(isCur ? '${_fmtDot(s.start)} ~ 진행 중' : '${_fmtDot(s.start)} ~ ${_fmtDot(s.end)}',
+            style: const TextStyle(fontSize: 11, color: Colors.grey))),
+        Text(isCur ? '${daysOf(s)}일째' : '${daysOf(s)}일',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: isCur ? kBlue : Colors.black87)),
+      ]));
+    }).toList();
+    final cardRoad = _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('진도 로드맵', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+      const SizedBox(height: 2),
+      const Text('띠의 길이 = 그 진도에 머문 기간 (오른쪽 끝이 지금)', style: TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 10),
+      band,
+      const SizedBox(height: 10),
+      ...stageRows,
+      if (stages.length > shown.length)
+        Padding(padding: const EdgeInsets.only(top: 4),
+          child: Text('이전 ${stages.length - shown.length}단계는 생략했어요',
+              style: const TextStyle(fontSize: 10, color: Colors.grey))),
+    ]));
+
+    // ④ 타수 추이
+    final pts = <MapEntry<DateTime, double>>[];
+    best.forEach((k, v) {
+      final d = DateTime.tryParse(k);
+      if (d == null) return;
+      if (_trendDays > 0 && today.difference(d).inDays >= _trendDays) return;
+      pts.add(MapEntry(d, v.toDouble()));
+    });
+    pts.sort((a, b) => a.key.compareTo(b.key));
+    Widget chart;
+    if (pts.isEmpty) {
+      chart = const Padding(padding: EdgeInsets.symmetric(vertical: 36),
+        child: Center(child: Text('이 기간에 타수 기록이 없어요.', style: TextStyle(color: Colors.grey, fontSize: 13))));
+    } else {
+      double lo = curTarget.toDouble(), hi = nextTarget.toDouble();
+      for (final p in pts) { lo = math.min(lo, p.value); hi = math.max(hi, p.value); }
+      lo = ((lo - 20) / 25).floor() * 25.0;
+      hi = ((hi + 20) / 25).ceil() * 25.0;
+      if (lo < 0) lo = 0;
+      final x0 = _trendDays > 0 ? today.subtract(Duration(days: _trendDays - 1)) : pts.first.key;
+      chart = SizedBox(height: 230, width: double.infinity, child: CustomPaint(
+        painter: _TrendPainter(pts, x0, today, lo, hi, [
+          _HLine(curTarget.toDouble(), '현재 단계 $curTarget', kPurple),
+          _HLine(nextTarget.toDouble(), '다음 단계 $nextTarget', Colors.green.shade700),
+        ])));
+    }
+    final cardTrend = _card(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        const Text('타수 추이', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+        const Spacer(),
+        _PB(label: '30일', value: '30', sel: '$_trendDays', onTap: (v) => setState(() => _trendDays = int.parse(v))),
+        const SizedBox(width: 4),
+        _PB(label: '90일', value: '90', sel: '$_trendDays', onTap: (v) => setState(() => _trendDays = int.parse(v))),
+        const SizedBox(width: 4),
+        _PB(label: '전체', value: '0', sel: '$_trendDays', onTap: (v) => setState(() => _trendDays = int.parse(v))),
+      ]),
+      const SizedBox(height: 2),
+      const Text('하루 중 최고 타수 · 점선은 목표 타수', style: TextStyle(fontSize: 11, color: Colors.grey)),
+      const SizedBox(height: 8),
+      chart,
+    ]));
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [cardNow, cardNext, cardRoad, cardTrend]);
+  }
+
+  // 목표까지 채워지는 게이지 (보라색 눈금 = 현재 단계 기준 타수)
+  Widget _gauge(int value, int curTarget, int nextTarget) {
+    final top = math.max(nextTarget, value).toDouble();
+    return LayoutBuilder(builder: (ctx, cons) {
+      final w = cons.maxWidth;
+      double x(num v) => (v / top * w).clamp(0.0, w).toDouble();
+      return SizedBox(height: 30, child: Stack(children: [
+        Positioned(left: 0, right: 0, top: 10,
+          child: Container(height: 10, decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(5)))),
+        Positioned(left: 0, top: 10,
+          child: Container(width: x(value), height: 10,
+            decoration: BoxDecoration(color: value >= nextTarget ? Colors.green : kBlue, borderRadius: BorderRadius.circular(5)))),
+        Positioned(left: math.max(0.0, x(curTarget) - 1.5), top: 4,
+          child: Container(width: 3, height: 22, color: kPurple)),
+      ]));
+    });
+  }
+
+  // ── 공부시간 / 순공시간 막대 그래프 ──
+  Widget _timeView() {
+    final typing = _tab == 'typing';
+    final today = _today;
+    final byDate = <String, double>{};
+    if (typing) {
+      for (final s in TypingStore.all()) { byDate[s.date] = (byDate[s.date] ?? 0) + s.activeMs / 60000.0; }
+    } else {
+      for (final r in Store.getRecords()) {
+        final m = (r.studyHours ?? 0) * 60 + (r.studyMinutes ?? 0);
+        if (m > 0) byDate[r.date] = m.toDouble();
+      }
+    }
+    double? val(String key) {
+      final x = byDate[key];
+      return (x != null && x > 0) ? x : null;
+    }
+
+    final items = <_BarItem>[];
+    int? hi;
+    if (_period == 'week') {
+      final mon = today.subtract(Duration(days: today.weekday - 1));
+      const names = ['월', '화', '수', '목', '금', '토', '일'];
+      for (int i = 0; i < 7; i++) {
+        final d = mon.add(Duration(days: i));
+        items.add(_BarItem(names[i], '${d.month}/${d.day} (${names[i]})', val(_ymd(d))));
+        if (_ymd(d) == _ymd(today)) hi = i;
+      }
+    } else if (_period == 'month') {
+      final last = DateTime(today.year, today.month + 1, 0).day;
+      for (int d = 1; d <= last; d++) {
+        final show = d == 1 || d % 5 == 0;
+        items.add(_BarItem(show ? '$d' : '', '${today.month}월 $d일', val(_ymd(DateTime(today.year, today.month, d)))));
+        if (d == today.day) hi = d - 1;
+      }
+    } else {
+      for (int m = 1; m <= 12; m++) {
+        double sum = 0;
+        final prefix = '${today.year}-${m.toString().padLeft(2, '0')}-';
+        byDate.forEach((k, x) { if (k.startsWith(prefix)) sum += x; });
+        items.add(_BarItem('$m월', '${today.year}년 $m월', sum > 0 ? sum : null));
+        if (m == today.month) hi = m - 1;
+      }
+    }
+    final vals = items.map((e) => e.value).whereType<double>().toList();
+    final total = vals.fold<double>(0, (a, b) => a + b);
+    final avg = vals.isEmpty ? 0.0 : total / vals.length;
+    final unit = _period == 'year' ? '월' : '하루';
+
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Row(children: [
+        _PB(label: '1주', value: 'week', sel: _period, onTap: (v) => setState(() { _period = v; _selBar = null; })),
+        const SizedBox(width: 6),
+        _PB(label: '1달', value: 'month', sel: _period, onTap: (v) => setState(() { _period = v; _selBar = null; })),
+        const SizedBox(width: 6),
+        _PB(label: '1년', value: 'year', sel: _period, onTap: (v) => setState(() { _period = v; _selBar = null; })),
+      ]),
+      const SizedBox(height: 14),
+      Text('${typing ? '순공시간' : '공부시간'}  이 기간 총 ${_fmtMinutes(total)}',
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: kBlueDark)),
+      if (vals.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 2),
+        child: Text('$unit 평균 ${_fmtMinutes(avg)} · 막대를 누르면 정확한 시간이 보여요',
+            style: const TextStyle(fontSize: 11, color: Colors.grey))),
+      const SizedBox(height: 14),
+      if (vals.isEmpty)
+        const Padding(padding: EdgeInsets.symmetric(vertical: 60),
+          child: Center(child: Text('기록이 없습니다', style: TextStyle(color: Colors.grey))))
+      else
+        SizedBox(height: 250, child: _BarChart(items: items, avg: vals.length >= 2 ? avg : null,
+          highlight: hi, selected: _selBar,
+          onSelect: (i) => setState(() => _selBar = _selBar == i ? null : i))),
+    ]);
   }
 }
-class _BD{final String label;final double? value;const _BD({required this.label,required this.value});}
+
+// 얇은 막대 그래프 (세로축은 시간 단위, 오늘 막대 강조, 누르면 값 표시)
+class _BarChart extends StatelessWidget {
+  final List<_BarItem> items;
+  final double? avg;
+  final int? highlight, selected;
+  final ValueChanged<int> onSelect;
+  const _BarChart({required this.items, required this.avg, required this.highlight,
+    required this.selected, required this.onSelect});
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(builder: (context, cons) {
+    final painter = _BarPainter(items, avg, highlight, selected);
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (d) {
+        final i = painter.indexAt(d.localPosition, cons.biggest);
+        if (i != null) onSelect(i);
+      },
+      child: CustomPaint(size: cons.biggest, painter: painter));
+  });
+}
+
+class _BarPainter extends CustomPainter {
+  final List<_BarItem> items;
+  final double? avg;
+  final int? highlight, selected;
+  _BarPainter(this.items, this.avg, this.highlight, this.selected);
+  static const double l = 46, r = 8, t = 28, b = 24;
+
+  double get _maxV {
+    double m = 0;
+    for (final e in items) {
+      final v = e.value;
+      if (v != null && v > m) m = v;
+    }
+    return m;
+  }
+
+  // 세로축 눈금 간격(분)과 맨 위 값
+  List<double> _axis(double maxV) {
+    const steps = [5.0, 10.0, 15.0, 20.0, 30.0, 60.0, 120.0, 180.0, 240.0, 360.0, 480.0, 720.0, 1440.0];
+    for (final s in steps) {
+      if (maxV / s <= 5) return [s, math.max((maxV / s).ceil() * s, s)];
+    }
+    return [1440.0, math.max((maxV / 1440).ceil() * 1440.0, 1440.0)];
+  }
+
+  String _axisLabel(double v) {
+    if (v <= 0) return '0';
+    if (v % 60 == 0) return '${(v ~/ 60)}시간';
+    return '${v.round()}분';
+  }
+
+  int? indexAt(Offset p, Size size) {
+    if (items.isEmpty || p.dx < l || p.dx > size.width - r) return null;
+    final slot = (size.width - l - r) / items.length;
+    return ((p.dx - l) / slot).floor().clamp(0, items.length - 1).toInt();
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width - l - r, h = size.height - t - b;
+    final ax = _axis(_maxV);
+    final step = ax[0], top = ax[1];
+    double yOf(double v) => t + h * (1 - v / top);
+    final grid = Paint()..color = const Color(0xFFEEF0F8)..strokeWidth = 1;
+    for (double v = 0; v <= top + 0.001; v += step) {
+      final y = yOf(v);
+      canvas.drawLine(Offset(l, y), Offset(size.width - r, y), grid);
+      _drawText(canvas, _axisLabel(v), Offset(l - 6, y), anchor: 'r');
+    }
+    final n = items.length;
+    final slot = w / n;
+    final barW = math.min(slot * 0.56, 20.0);
+    for (int i = 0; i < n; i++) {
+      final cx = l + slot * (i + 0.5);
+      final v = items[i].value;
+      if (v != null) {
+        final color = selected == i ? kBlueDark : (highlight == i ? kBlue : kBlue.withOpacity(0.38));
+        canvas.drawRRect(
+          RRect.fromRectAndCorners(Rect.fromLTRB(cx - barW / 2, yOf(v), cx + barW / 2, yOf(0)),
+              topLeft: const Radius.circular(4), topRight: const Radius.circular(4)),
+          Paint()..color = color);
+      } else {
+        canvas.drawRect(Rect.fromLTRB(cx - barW / 2, yOf(0) - 2, cx + barW / 2, yOf(0)),
+            Paint()..color = const Color(0xFFE6E9F2));
+      }
+      if (items[i].label.isNotEmpty) {
+        _drawText(canvas, items[i].label, Offset(cx, size.height - b + 12),
+            color: highlight == i ? kBlue : Colors.grey,
+            fw: highlight == i ? FontWeight.w800 : FontWeight.w600);
+      }
+    }
+    final a = avg;
+    if (a != null && a > 0) {
+      final y = yOf(a);
+      _dashedH(canvas, l, size.width - r, y, Paint()..color = const Color(0xFFFF9800)..strokeWidth = 1.4);
+      _drawText(canvas, '평균 ${_fmtMinutes(a)}', Offset(size.width - r, y - 8),
+          anchor: 'r', color: const Color(0xFFE65100), fw: FontWeight.w700);
+    }
+    final s = selected;
+    if (s != null && s >= 0 && s < n) {
+      final v = items[s].value;
+      final tp = TextPainter(
+        text: TextSpan(text: '${items[s].tip}  ${v == null ? '기록 없음' : _fmtMinutes(v)}',
+            style: const TextStyle(fontSize: 11, color: Colors.white, fontWeight: FontWeight.w700)),
+        textDirection: TextDirection.ltr)..layout();
+      final cx = l + slot * (s + 0.5);
+      final y = v == null ? yOf(0) : yOf(v);
+      final bx = (cx - tp.width / 2 - 8).clamp(0.0, math.max(0.0, size.width - tp.width - 16)).toDouble();
+      final by = math.max(0.0, y - 30);
+      canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(bx, by, tp.width + 16, 22), const Radius.circular(8)),
+          Paint()..color = kBlueDark);
+      tp.paint(canvas, Offset(bx + 8, by + 4));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _BarPainter old) => true;
+}
+
+// 타수 추이 선 그래프 (점선 = 현재/다음 단계 목표 타수)
+class _TrendPainter extends CustomPainter {
+  final List<MapEntry<DateTime, double>> pts;
+  final DateTime x0, x1;
+  final double lo, hi;
+  final List<_HLine> hlines;
+  _TrendPainter(this.pts, this.x0, this.x1, this.lo, this.hi, this.hlines);
+  static const double l = 38, r = 10, t = 16, b = 24;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width - l - r, h = size.height - t - b;
+    final span = x1.difference(x0).inDays;
+    double xOf(DateTime d) => span <= 0 ? l + w / 2 : l + w * (d.difference(x0).inDays / span).clamp(0.0, 1.0);
+    double yOf(double v) => t + h * (1 - (v - lo) / (hi - lo));
+
+    final grid = Paint()..color = const Color(0xFFEEF0F8)..strokeWidth = 1;
+    for (int i = 0; i <= 4; i++) {
+      final v = lo + (hi - lo) * i / 4;
+      final y = yOf(v);
+      canvas.drawLine(Offset(l, y), Offset(size.width - r, y), grid);
+      _drawText(canvas, v.round().toString(), Offset(l - 6, y), anchor: 'r');
+    }
+    for (final hl in hlines) {
+      final y = yOf(hl.value);
+      _dashedH(canvas, l, size.width - r, y, Paint()..color = hl.color..strokeWidth = 1.4);
+      _drawText(canvas, hl.label, Offset(size.width - r, y - 8), anchor: 'r', color: hl.color, fw: FontWeight.w700);
+    }
+
+    final line = Paint()..color = kBlue..strokeWidth = 2.2..style = PaintingStyle.stroke..strokeJoin = StrokeJoin.round;
+    final path = Path();
+    for (int i = 0; i < pts.length; i++) {
+      final p = Offset(xOf(pts[i].key), yOf(pts[i].value));
+      if (i == 0) { path.moveTo(p.dx, p.dy); } else { path.lineTo(p.dx, p.dy); }
+    }
+    canvas.drawPath(path, line);
+    for (final p in pts) {
+      final o = Offset(xOf(p.key), yOf(p.value));
+      canvas.drawCircle(o, 3.6, Paint()..color = Colors.white);
+      canvas.drawCircle(o, 2.6, Paint()..color = kBlue);
+    }
+    final last = pts.last;
+    _drawText(canvas, '${last.value.round()}', Offset(xOf(last.key), yOf(last.value) - 12),
+        color: kBlueDark, fw: FontWeight.w800, fs: 11);
+
+    _drawText(canvas, '${x0.month}/${x0.day}', Offset(l, size.height - b + 12), anchor: 'l');
+    _drawText(canvas, '${x1.month}/${x1.day}', Offset(size.width - r, size.height - b + 12), anchor: 'r');
+  }
+
+  @override
+  bool shouldRepaint(covariant _TrendPainter old) => true;
+}
 class _PB extends StatelessWidget {
   final String label,value,sel;final void Function(String) onTap;
   const _PB({required this.label,required this.value,required this.sel,required this.onTap});
@@ -4017,28 +4599,154 @@ void _showAbbrEditDialog(BuildContext context, {AbbreviationModel? existing}) {
 }
 
 // ── 취약점 분석 화면 ──────────────────────────────────────────────────────────
-class WeakPointScreen extends StatelessWidget {
+// 단어의 글자가 아니라, 약어에 등록해 둔 운지(초·중·종성 키) 기준으로
+// 어느 키에서 자주 틀리는지를 키보드 위에 색으로 보여준다.
+class WeakPointScreen extends StatefulWidget {
   const WeakPointScreen({super.key});
+  @override State<WeakPointScreen> createState() => _WeakPointScreenState();
+}
+
+class _WeakPointScreenState extends State<WeakPointScreen> {
+  int _days = 30; // 0 = 전체
+  String? _sel;   // 누른 키 id
+  late KeyWeakResult _cur;
+  KeyWeakResult? _prev;
+  late List<AbbreviationModel> _abbrs;
+
+  @override
+  void initState() { super.initState(); _load(); }
+
+  void _load() {
+    final now = DateTime.now();
+    final to = now.add(const Duration(minutes: 1));
+    final from = _days == 0 ? DateTime(2000) : now.subtract(Duration(days: _days));
+    _abbrs = Store.getAbbreviations();
+    _cur = Store.analyzeKeyWeakness(from: from, to: to, abbrs: _abbrs);
+    _prev = _days == 0 ? null : Store.analyzeKeyWeakness(
+        from: from.subtract(Duration(days: _days)), to: from, abbrs: _abbrs, forceRate: _cur.rateMode);
+  }
+
+  // 키 하나의 약한 정도: 오답률(출제 5번 이상일 때) 또는 오답 횟수
+  double? _scoreOf(KeyWeakResult? r, String id) {
+    if (r == null) return null;
+    final s = r.stats[id];
+    if (s == null) return null;
+    if (r.rateMode) return s.attempts >= 5 ? s.rate : null;
+    return s.wrong > 0 ? s.wrong.toDouble() : null;
+  }
+
+  static String _role(String type) => type == 'cho' ? '초성' : type == 'jung' ? '중성' : '종성';
+  static String _label(String id) => id.substring(id.indexOf(':') + 1);
+  static String _type(String id) => id.substring(0, id.indexOf(':'));
+
   @override
   Widget build(BuildContext context) {
-    final weakPoints = Store.analyzeWeakPoints(days: 30);
-    final recommended = Store.recommendByWeakPoints(weakPoints);
-    final allEmpty = weakPoints.values.every((m) => m.isEmpty);
+    final cur = _cur;
+    final scores = <String, double>{};
+    for (final id in cur.stats.keys) {
+      final v = _scoreOf(cur, id);
+      if (v != null && v > 0) scores[id] = v;
+    }
+    final maxScore = scores.isEmpty ? 0.0 : scores.values.reduce(math.max);
+    final ranked = scores.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final noStroke = _abbrs.where((a) => a.initial.isEmpty && a.medial.isEmpty && a.final_.isEmpty).length;
+    final periodText = _days == 0 ? '전체 기간' : '최근 $_days일';
 
     String buildPrompt() {
-      final cho = (weakPoints['cho'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
-      final jung = (weakPoints['jung'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
-      final jong = (weakPoints['jong'] ?? {}).entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
-      final recWords = recommended.map((a) => a.displayWord.replaceAll('*',' ')).join(', ');
-      return '''속기 학습 취약점 분석 결과입니다.
+      String pick(String type) {
+        final l = ranked.where((e) => _type(e.key) == type).take(5).map((e) {
+          final s = cur.stats[e.key]!;
+          return cur.rateMode ? '${_label(e.key)}(${(s.rate * 100).round()}%)' : '${_label(e.key)}(${s.wrong}회)';
+        }).toList();
+        return l.isEmpty ? '없음' : l.join(', ');
+      }
+      final wrongTexts = cur.wrongByText.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+      final words = wrongTexts.take(10).map((e) => e.key).join(', ');
+      return '''속기 학습 취약점 분석 결과입니다. (약어에 등록한 운지 기준, $periodText)
 
-[취약한 초성] ${cho.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
-[취약한 중성] ${jung.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
-[취약한 종성] ${jong.take(5).map((e)=>'${e.key}(${e.value}회)').join(', ')}
-[취약 관련 약어] $recWords
+[취약한 초성 키] ${pick('cho')}
+[취약한 중성 키] ${pick('jung')}
+[취약한 종성 키] ${pick('jong')}
+[최근 많이 틀린 약어] $words
 
-위 취약점을 집중적으로 연습할 수 있는 속기 연습 문장 10개를 만들어주세요.
-각 문장은 취약한 자음/모음이 자주 등장하도록 구성해주세요.''';
+위 키가 자주 등장하는 연습 문장 10개를 만들어주세요.
+각 문장은 취약한 자음/모음 키를 쓰는 약어가 자주 등장하도록 구성해주세요.''';
+    }
+
+    Widget rankRow(int i, MapEntry<String, double> e) {
+      final s = cur.stats[e.key]!;
+      final txt = cur.rateMode ? '오답률 ${(s.rate * 100).round()}%  (${s.wrong}/${s.attempts})' : '오답 ${s.wrong}회';
+      String? delta;
+      Color dc = Colors.grey;
+      final pv = _scoreOf(_prev, e.key);
+      if (pv != null) {
+        final d = cur.rateMode ? ((e.value - pv) * 100).round() : (e.value - pv).round();
+        final u = cur.rateMode ? '%p' : '회';
+        if (d > 0) { delta = '▲ $d$u'; dc = Colors.red; }
+        else if (d < 0) { delta = '▼ ${-d}$u'; dc = Colors.green.shade700; }
+        else { delta = '변화 없음'; }
+      }
+      final on = _sel == e.key;
+      return GestureDetector(
+        onTap: () => setState(() => _sel = on ? null : e.key),
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: on ? kBlueLight : Colors.white, borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: on ? kBlue : const Color(0xFFEEF0F8), width: on ? 1.5 : 1)),
+          child: Row(children: [
+            Container(width: 20, height: 20,
+              decoration: BoxDecoration(color: const Color(0xFFD32F2F), borderRadius: BorderRadius.circular(6)),
+              child: Center(child: Text('${i + 1}',
+                  style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)))),
+            const SizedBox(width: 10),
+            SizedBox(width: 62, child: Text('${_role(_type(e.key))} ${_label(e.key)}',
+                style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w800))),
+            Expanded(child: Text(txt, style: const TextStyle(fontSize: 12, color: Colors.black54))),
+            if (delta != null) Text(delta, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w800, color: dc)),
+          ])));
+    }
+
+    // 누른 키를 쓰는 약어 중 틀린 것
+    Widget detail() {
+      final id = _sel!;
+      final list = _abbrs.where((a) => abbrWeakKeys(a).contains(id) && (cur.wrongByText[a.quizText] ?? 0) > 0).toList()
+        ..sort((a, b) => (cur.wrongByText[b.quizText] ?? 0).compareTo(cur.wrongByText[a.quizText] ?? 0));
+      final shown = list.take(24).toList();
+      return Container(
+        width: double.infinity, margin: const EdgeInsets.only(top: 6, bottom: 4), padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(color: const Color(0xFFFFF8F0), borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFFFE0B0))),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${_role(_type(id))} ${_label(id)} 키로 틀린 약어 (${list.length}개)',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w800, color: Color(0xFFE65100))),
+          const SizedBox(height: 8),
+          if (list.isEmpty)
+            const Text('이 기간에 이 키로 틀린 약어가 없어요.', style: TextStyle(fontSize: 12, color: Colors.grey))
+          else ...[
+            Wrap(spacing: 6, runSpacing: 6, children: shown.map((a) => Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFFFE0B0))),
+              child: Text('${a.quizText}  ${cur.wrongByText[a.quizText]}회',
+                  style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)))).toList()),
+            if (list.length > shown.length)
+              Padding(padding: const EdgeInsets.only(top: 6),
+                child: Text('외 ${list.length - shown.length}개', style: const TextStyle(fontSize: 11, color: Colors.grey))),
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              onPressed: () {
+                kQuizPreset.value = list;
+                kTabRequest.value = 4;
+                Navigator.pop(context);
+              },
+              icon: const Icon(Icons.quiz_rounded, size: 16),
+              label: Text('이 약어 ${list.length}개 테스트', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(backgroundColor: kBlue, foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)))),
+          ],
+        ]));
     }
 
     return Scaffold(backgroundColor: Colors.white,
@@ -4046,52 +4754,65 @@ class WeakPointScreen extends StatelessWidget {
         leading: IconButton(icon: const Icon(Icons.arrow_back_ios_rounded, color: kBlue),
             onPressed: () => Navigator.pop(context)),
         title: const Text('취약점 분석', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 18))),
-      body: allEmpty
-        ? const Center(child: Padding(padding: EdgeInsets.all(32),
-            child: Text('아직 오답 데이터가 없어요.\n테스트를 더 진행하면 분석 결과가 나타납니다.',
-                textAlign: TextAlign.center, style: TextStyle(color: Colors.grey, fontSize: 14))))
-        : SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            // 초/중/종성별 취약도
-            for (final entry in [
-              MapEntry('초성', weakPoints['cho']!),
-              MapEntry('중성', weakPoints['jung']!),
-              MapEntry('종성', weakPoints['jong']!),
-            ]) ...[
-              if (entry.value.isNotEmpty) ...[
-                Text(entry.key, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
-                const SizedBox(height: 8),
-                () {
-                  final sorted = entry.value.entries.toList()..sort((a,b)=>b.value.compareTo(a.value));
-                  final max = sorted.first.value;
-                  return Column(children: sorted.take(8).map((e) => Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: Row(children: [
-                      SizedBox(width: 36, child: Text(e.key, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w700))),
-                      const SizedBox(width: 8),
-                      Expanded(child: ClipRRect(borderRadius: BorderRadius.circular(4),
-                        child: LinearProgressIndicator(value: e.value / max,
-                          backgroundColor: const Color(0xFFEEEEEE),
-                          color: entry.key == '초성' ? const Color(0xFF4A90E2) : entry.key == '중성' ? const Color(0xFF7B5EA7) : const Color(0xFFE2574A),
-                          minHeight: 16))),
-                      const SizedBox(width: 8),
-                      Text('${e.value}회', style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                    ]))).toList());
-                }(),
-                const SizedBox(height: 20),
-              ],
-            ],
-            // 취약 약어 추천
-            if (recommended.isNotEmpty) ...[
-              const Text('취약점 관련 추천 약어', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
-              const SizedBox(height: 8),
-              Wrap(spacing: 8, runSpacing: 8, children: recommended.map((a) =>
-                Container(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(20)),
-                  child: Text(a.displayWord.replaceAll('*',' '),
-                      style: const TextStyle(fontSize: 13, color: kBlue, fontWeight: FontWeight.w600)))).toList()),
-              const SizedBox(height: 24),
-            ],
-            // AI 프롬프트 복사
+      body: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            _PB(label: '7일', value: '7', sel: '$_days', onTap: (v) => setState(() { _days = int.parse(v); _sel = null; _load(); })),
+            const SizedBox(width: 6),
+            _PB(label: '30일', value: '30', sel: '$_days', onTap: (v) => setState(() { _days = int.parse(v); _sel = null; _load(); })),
+            const SizedBox(width: 6),
+            _PB(label: '전체', value: '0', sel: '$_days', onTap: (v) => setState(() { _days = int.parse(v); _sel = null; _load(); })),
+          ]),
+          const SizedBox(height: 10),
+          Container(width: double.infinity, padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(12)),
+            child: Text(
+              cur.rateMode
+                  ? '$periodText 약어 테스트 ${cur.totalAttempts}문제 기록 기준 · 출제 대비 오답률이에요. (출제 5번 미만인 키는 제외)'
+                  : '아직 출제 기록이 적어서(${cur.totalAttempts}문제) 지금은 오답 횟수 기준이에요. 테스트를 계속하면 오답률로 바뀌어요.',
+              style: const TextStyle(fontSize: 11, color: kBlueDark, height: 1.5))),
+          const SizedBox(height: 14),
+          if (scores.isEmpty)
+            Padding(padding: const EdgeInsets.symmetric(vertical: 40),
+              child: Center(child: Text(
+                cur.stats.isEmpty
+                    ? '아직 분석할 오답 데이터가 없어요.\n테스트를 더 진행하면 분석 결과가 나타납니다.'
+                    : '이 기간에는 틀린 기록이 없어요.',
+                textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey, fontSize: 14, height: 1.6))))
+          else ...[
+            const Text('내 운지에서 약한 키', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+            const SizedBox(height: 2),
+            const Text('진할수록 자주 틀린 키예요 · 키를 누르면 그 키로 틀린 약어가 나와요',
+                style: TextStyle(fontSize: 11, color: Colors.grey)),
+            const SizedBox(height: 10),
+            _HeatKeyboard(scores: scores, maxScore: maxScore, selected: _sel,
+                onTap: (id) => setState(() => _sel = _sel == id ? null : id)),
+            const SizedBox(height: 6),
+            Row(children: [
+              const Text('적음', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              const SizedBox(width: 6),
+              Container(width: 110, height: 8, decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(4),
+                gradient: const LinearGradient(colors: [Color(0xFFFFE3DE), Color(0xFFD32F2F)]))),
+              const SizedBox(width: 6),
+              const Text('많음', style: TextStyle(fontSize: 10, color: Colors.grey)),
+              const SizedBox(width: 10),
+              const Expanded(child: Text('왼쪽 초성 · 아래 중성 · 오른쪽 종성', textAlign: TextAlign.right,
+                  overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10, color: Colors.grey))),
+            ]),
+            if (_sel != null) detail(),
+            const SizedBox(height: 18),
+            Row(children: [
+              const Text('약한 키 TOP 5', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
+              const SizedBox(width: 8),
+              if (_prev != null) const Text('지난 기간 대비', style: TextStyle(fontSize: 11, color: Colors.grey)),
+            ]),
+            const SizedBox(height: 8),
+            for (int i = 0; i < math.min(5, ranked.length); i++) rankRow(i, ranked[i]),
+            if (noStroke > 0) Padding(padding: const EdgeInsets.only(top: 6),
+              child: Text('운지가 등록되지 않은 약어 $noStroke개는 분석에서 빠져요.',
+                  style: const TextStyle(fontSize: 11, color: Colors.grey))),
+            const SizedBox(height: 22),
             Container(width: double.infinity, padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(color: const Color(0xFFF8F4FF), borderRadius: BorderRadius.circular(16),
                   border: Border.all(color: const Color(0xFFD0B8FF))),
@@ -4102,7 +4823,7 @@ class WeakPointScreen extends StatelessWidget {
                   Text('AI 연습 문장 생성', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: Color(0xFF7B5EA7))),
                 ]),
                 const SizedBox(height: 8),
-                const Text('아래 프롬프트를 복사해서 AI에게 붙여넣으면\n취약점 맞춤 연습 문장을 만들어 줍니다.',
+                const Text('아래 프롬프트를 복사해서 AI에게 붙여넣으면\n약한 키 맞춤 연습 문장을 만들어 줍니다.',
                     style: TextStyle(fontSize: 12, color: Colors.grey)),
                 const SizedBox(height: 12),
                 ElevatedButton.icon(
@@ -4116,7 +4837,77 @@ class WeakPointScreen extends StatelessWidget {
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7B5EA7), foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
               ])),
-          ])));
+          ],
+        ])));
+  }
+}
+
+// 속기 키보드 위에 약한 정도를 색으로 칠해서 보여주는 위젯
+class _HeatKeyboard extends StatelessWidget {
+  final Map<String, double> scores; // 키 id → 점수 (없으면 칠하지 않음)
+  final double maxScore;
+  final String? selected;
+  final ValueChanged<String> onTap;
+  const _HeatKeyboard({required this.scores, required this.maxScore, required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <int, List<_SoggiKey>>{};
+    for (final k in _kbKeys) { rows.putIfAbsent(k.row, () => []).add(k); }
+    for (final r in rows.values) { r.sort((a, b) => a.col.compareTo(b.col)); }
+
+    return LayoutBuilder(builder: (context, cons) {
+      final avail = cons.maxWidth.isFinite ? cons.maxWidth : 428.0;
+      final double scale = ((avail - 40) / 388).clamp(0.35, 1.25).toDouble();
+      final double kw = 38.0 * scale, kh = 38.0 * scale;
+      final double fs = (13.0 * scale).clamp(8.0, 16.0).toDouble();
+      final double rowW = 10 * (kw + 4) + 8 * scale;
+
+      Widget buildKey(_SoggiKey k, {double? w, double? h}) {
+        final type = k.type == 'jong_special' ? 'jong' : k.type;
+        final id = weakKeyId(type, k.label);
+        final sc = scores[id];
+        final double? t = (sc == null || maxScore <= 0) ? null : (sc / maxScore).clamp(0.0, 1.0).toDouble();
+        final bg = t == null
+            ? const Color(0xFFF0F0F5)
+            : Color.lerp(const Color(0xFFFFE3DE), const Color(0xFFD32F2F), t)!;
+        final fg = (t != null && t > 0.55) ? Colors.white : Colors.black87;
+        final on = selected == id;
+        final ww = w ?? kw, hh = h ?? kh;
+        final br = k.row == 3
+            ? BorderRadius.only(bottomLeft: Radius.circular(ww / 2), bottomRight: Radius.circular(ww / 2),
+                topLeft: const Radius.circular(4), topRight: const Radius.circular(4))
+            : BorderRadius.circular(6);
+        return GestureDetector(
+          onTap: () => onTap(id),
+          child: Container(width: ww, height: hh, margin: const EdgeInsets.all(2),
+            decoration: BoxDecoration(color: bg, borderRadius: br,
+              border: Border.all(color: on ? kBlueDark : const Color(0xFFDDDDE8), width: on ? 2.4 : 1)),
+            child: Center(child: Text(k.label,
+                style: TextStyle(fontSize: fs, color: fg, fontWeight: FontWeight.w700)))));
+      }
+
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        for (int r = 0; r < 3; r++)
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            ...rows[r]!.map((k) {
+              if (k.col == 5 && rows[r]!.indexOf(k) > 0) {
+                return Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(width: 4 * scale, height: kh * 0.8, margin: EdgeInsets.symmetric(horizontal: 2 * scale),
+                      decoration: BoxDecoration(color: const Color(0xFFE0E0E0), borderRadius: BorderRadius.circular(2))),
+                  buildKey(k),
+                ]);
+              }
+              return buildKey(k);
+            }),
+          ]),
+        SizedBox(height: 4 * scale),
+        // 엄지 모음(중성): 키보드 가운데 아래
+        SizedBox(width: rowW, child: Center(
+          child: Row(mainAxisSize: MainAxisSize.min,
+              children: rows[3]!.map((k) => buildKey(k, w: kw + 2, h: kh * 1.2)).toList()))),
+      ]);
+    });
   }
 }
 
@@ -6749,6 +7540,7 @@ class _QuizScreenState extends State<QuizScreen> {
     }
 
     Store.logQuizSeen(correctText); // 마지막 테스트 시각 기록
+    if (q is AbbreviationModel && !seeing) Store.logQuizAttempt(correctText, wrongWords.isEmpty); // 취약점 오답률용
     if (wrongWords.isNotEmpty) {
       Store.logQuizWrong(correctText);
       Store.resetStreak(correctText);
