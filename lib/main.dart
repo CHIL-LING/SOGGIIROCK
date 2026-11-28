@@ -4740,13 +4740,13 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
         from: from.subtract(Duration(days: _days)), to: from, abbrs: _abbrs, forceRate: _cur.rateMode);
   }
 
-  // 키 하나의 약한 정도: 오답률(출제 5번 이상일 때) 또는 오답 횟수
-  double? _scoreOf(KeyWeakResult? r, String id) {
+  // 키 하나의 약한 정도: 오답률(출제 3번 이상일 때) 또는 오답 횟수
+  double? _scoreOf(KeyWeakResult? r, String id, {bool? byCount}) {
     if (r == null) return null;
     final s = r.stats[id];
     if (s == null) return null;
-    if (r.rateMode) return s.attempts >= 5 ? s.rate : null;
-    return s.wrong > 0 ? s.wrong.toDouble() : null;
+    if (byCount ?? !r.rateMode) return s.wrong > 0 ? s.wrong.toDouble() : null;
+    return s.attempts >= 3 ? s.rate : null;
   }
 
   static String _role(String type) => type == 'cho' ? '초성' : type == 'jung' ? '중성' : '종성';
@@ -4756,11 +4756,20 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
   @override
   Widget build(BuildContext context) {
     final cur = _cur;
-    final scores = <String, double>{};
-    for (final id in cur.stats.keys) {
-      final v = _scoreOf(cur, id);
-      if (v != null && v > 0) scores[id] = v;
+    Map<String, double> calc(bool byCount) {
+      final m = <String, double>{};
+      for (final id in cur.stats.keys) {
+        final v = _scoreOf(cur, id, byCount: byCount);
+        if (v != null && v > 0) m[id] = v;
+      }
+      return m;
     }
+    var useCount = !cur.rateMode;
+    var scores = calc(useCount);
+    // 출제 기록은 있는데 키마다 출제 횟수가 아직 적어서 칠할 키가 없으면 오답 횟수로 대신 칠한다
+    final fellBack = cur.rateMode && scores.isEmpty;
+    if (fellBack) { useCount = true; scores = calc(true); }
+    final useRate = !useCount;
     final maxScore = scores.isEmpty ? 0.0 : scores.values.reduce(math.max);
     final ranked = scores.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
     final noStroke = _abbrs.where((a) => a.initial.isEmpty && a.medial.isEmpty && a.final_.isEmpty).length;
@@ -4770,7 +4779,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
       String pick(String type) {
         final l = ranked.where((e) => _type(e.key) == type).take(5).map((e) {
           final s = cur.stats[e.key]!;
-          return cur.rateMode ? '${_label(e.key)}(${(s.rate * 100).round()}%)' : '${_label(e.key)}(${s.wrong}회)';
+          return useRate ? '${_label(e.key)}(${(s.rate * 100).round()}%)' : '${_label(e.key)}(${s.wrong}회)';
         }).toList();
         return l.isEmpty ? '없음' : l.join(', ');
       }
@@ -4789,13 +4798,13 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
 
     Widget rankRow(int i, MapEntry<String, double> e) {
       final s = cur.stats[e.key]!;
-      final txt = cur.rateMode ? '오답률 ${(s.rate * 100).round()}%  (${s.wrong}/${s.attempts})' : '오답 ${s.wrong}회';
+      final txt = useRate ? '오답률 ${(s.rate * 100).round()}%  (${s.wrong}/${s.attempts})' : '오답 ${s.wrong}회';
       String? delta;
       Color dc = Colors.grey;
-      final pv = _scoreOf(_prev, e.key);
+      final pv = _scoreOf(_prev, e.key, byCount: useCount);
       if (pv != null) {
-        final d = cur.rateMode ? ((e.value - pv) * 100).round() : (e.value - pv).round();
-        final u = cur.rateMode ? '%p' : '회';
+        final d = useRate ? ((e.value - pv) * 100).round() : (e.value - pv).round();
+        final u = useRate ? '%p' : '회';
         if (d > 0) { delta = '▲ $d$u'; dc = Colors.red; }
         else if (d < 0) { delta = '▼ ${-d}$u'; dc = Colors.green.shade700; }
         else { delta = '변화 없음'; }
@@ -4881,19 +4890,21 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
           Container(width: double.infinity, padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(12)),
             child: Text(
-              cur.rateMode
-                  ? '$periodText 약어 테스트 ${cur.totalAttempts}문제 기록 기준 · 출제 대비 오답률이에요. (출제 5번 미만인 키는 제외)'
-                  : '아직 출제 기록이 적어서(${cur.totalAttempts}문제) 지금은 오답 횟수 기준이에요. 테스트를 계속하면 오답률로 바뀌어요.',
+              useRate
+                  ? '$periodText 약어 테스트 ${cur.totalAttempts}문제 기록 기준 · 출제 대비 오답률이에요. (출제 3번 미만인 키는 칠하지 않아요)'
+                  : fellBack
+                      ? '출제 기록(${cur.totalAttempts}문제)은 있지만 키마다 아직 3번 미만이라 오답 횟수 기준으로 칠했어요. 테스트가 쌓이면 오답률로 바뀌어요.'
+                      : '아직 출제 기록이 적어서(${cur.totalAttempts}문제) 지금은 오답 횟수 기준이에요. 테스트를 계속하면 오답률로 바뀌어요.',
               style: const TextStyle(fontSize: 11, color: kBlueDark, height: 1.5))),
           const SizedBox(height: 14),
           if (scores.isEmpty)
-            Padding(padding: const EdgeInsets.symmetric(vertical: 40),
+            Padding(padding: const EdgeInsets.only(bottom: 14),
               child: Center(child: Text(
                 cur.stats.isEmpty
-                    ? '아직 분석할 오답 데이터가 없어요.\n테스트를 더 진행하면 분석 결과가 나타납니다.'
+                    ? '아직 분석할 오답 데이터가 없어요.\n테스트를 더 진행하면 키보드가 칠해져요.'
                     : '이 기간에는 틀린 기록이 없어요.',
-                textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey, fontSize: 14, height: 1.6))))
-          else ...[
+                textAlign: TextAlign.center, style: const TextStyle(color: Colors.grey, fontSize: 13, height: 1.6)))),
+          ...[
             const Text('내 운지에서 약한 키', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
             const SizedBox(height: 2),
             const Text('진할수록 자주 틀린 키예요 · 키를 누르면 그 키로 틀린 약어가 나와요',
@@ -4915,6 +4926,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
                   overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10, color: Colors.grey))),
             ]),
             if (_sel != null) detail(),
+            if (ranked.isNotEmpty) ...[
             const SizedBox(height: 18),
             Row(children: [
               const Text('약한 키 TOP 5', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w900)),
@@ -4951,6 +4963,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
                   style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7B5EA7), foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)))),
               ])),
+            ],
           ],
         ])));
   }
