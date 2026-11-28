@@ -382,6 +382,7 @@ List<String> abbrWeakKeys(AbbreviationModel a) {
 
 class KeyWeakStat {
   int attempts = 0, wrong = 0;
+  int logWrong = 0; // 예전부터 쌓인 오답 기록(quizWrongLog) 기준 틀린 횟수
   double get rate => attempts == 0 ? 0.0 : wrong / attempts;
 }
 
@@ -389,8 +390,9 @@ class KeyWeakResult {
   final Map<String, KeyWeakStat> stats; // 키 id → 출제/오답 수
   final bool rateMode;                  // true: 출제 대비 오답률 / false: 오답 횟수
   final int totalAttempts;              // 이 기간 약어 테스트 출제 수
-  final Map<String, int> wrongByText;   // 약어 → 이 기간 틀린 횟수
-  KeyWeakResult(this.stats, this.rateMode, this.totalAttempts, this.wrongByText);
+  final Map<String, int> wrongByText;   // 약어 → 이 기간 틀린 횟수 (오답률 모드에서는 출제 기록 기준)
+  final Map<String, int> wrongLogByText; // 약어 → 이 기간 틀린 횟수 (예전 오답 기록 전체 기준)
+  KeyWeakResult(this.stats, this.rateMode, this.totalAttempts, this.wrongByText, this.wrongLogByText);
 }
 
 class Store {
@@ -805,34 +807,32 @@ class Store {
       if (m['ok'] != true) wrongA[t] = (wrongA[t] ?? 0) + 1;
     }
     final rateMode = forceRate ?? (total >= 30);
-    final wrongByText = <String, int>{};
-    if (rateMode) {
-      wrongByText.addAll(wrongA);
-    } else {
-      for (final e in _qw.values) {
-        final m = Map.from(e as Map);
-        final ts = DateTime.tryParse(m['ts'] as String? ?? '');
-        if (ts == null || ts.isBefore(from) || !ts.isBefore(to)) continue;
-        final t = m['text'] as String;
-        wrongByText[t] = (wrongByText[t] ?? 0) + 1;
-      }
+    // 예전부터 쌓인 오답 기록은 항상 따로 센다 (출제 기록이 쌓여도 사라지지 않게)
+    final wrongLog = <String, int>{};
+    for (final e in _qw.values) {
+      final m = Map.from(e as Map);
+      final ts = DateTime.tryParse(m['ts'] as String? ?? '');
+      if (ts == null || ts.isBefore(from) || !ts.isBefore(to)) continue;
+      final t = m['text'] as String;
+      wrongLog[t] = (wrongLog[t] ?? 0) + 1;
     }
+    final wrongByText = rateMode ? wrongA : wrongLog;
     final stats = <String, KeyWeakStat>{};
-    void add(String text, int att, int wr) {
+    void add(String text, int att, int wr, int lw) {
       final a = byText[text];
       if (a == null) return;
       for (final k in abbrWeakKeys(a)) {
         final s = stats.putIfAbsent(k, () => KeyWeakStat());
         s.attempts += att;
         s.wrong += wr;
+        s.logWrong += lw;
       }
     }
     if (rateMode) {
-      attempts.forEach((t, n) => add(t, n, wrongA[t] ?? 0));
-    } else {
-      wrongByText.forEach((t, n) => add(t, 0, n));
+      attempts.forEach((t, n) => add(t, n, wrongA[t] ?? 0, 0));
     }
-    return KeyWeakResult(stats, rateMode, total, wrongByText);
+    wrongLog.forEach((t, n) => add(t, 0, 0, n));
+    return KeyWeakResult(stats, rateMode, total, wrongByText, wrongLog);
   }
   // 최근 N일간 틀린 횟수를 항목(전체 텍스트) 단위로 집계
   static Map<String, int> getRecentWrongCounts({int days = 7}) {
@@ -4722,6 +4722,7 @@ class WeakPointScreen extends StatefulWidget {
 
 class _WeakPointScreenState extends State<WeakPointScreen> {
   int _days = 30; // 0 = 전체
+  bool _byRate = false; // false: 오답 횟수(예전 기록 포함) / true: 출제 대비 오답률
   String? _sel;   // 누른 키 id
   late KeyWeakResult _cur;
   KeyWeakResult? _prev;
@@ -4745,7 +4746,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
     if (r == null) return null;
     final s = r.stats[id];
     if (s == null) return null;
-    if (byCount ?? !r.rateMode) return s.wrong > 0 ? s.wrong.toDouble() : null;
+    if (byCount ?? !r.rateMode) return s.logWrong > 0 ? s.logWrong.toDouble() : null;
     return s.attempts >= 3 ? s.rate : null;
   }
 
@@ -4764,10 +4765,10 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
       }
       return m;
     }
-    var useCount = !cur.rateMode;
+    var useCount = !(cur.rateMode && _byRate);
     var scores = calc(useCount);
     // 출제 기록은 있는데 키마다 출제 횟수가 아직 적어서 칠할 키가 없으면 오답 횟수로 대신 칠한다
-    final fellBack = cur.rateMode && scores.isEmpty;
+    final fellBack = cur.rateMode && _byRate && scores.isEmpty;
     if (fellBack) { useCount = true; scores = calc(true); }
     final useRate = !useCount;
     final maxScore = scores.isEmpty ? 0.0 : scores.values.reduce(math.max);
@@ -4779,11 +4780,11 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
       String pick(String type) {
         final l = ranked.where((e) => _type(e.key) == type).take(5).map((e) {
           final s = cur.stats[e.key]!;
-          return useRate ? '${_label(e.key)}(${(s.rate * 100).round()}%)' : '${_label(e.key)}(${s.wrong}회)';
+          return useRate ? '${_label(e.key)}(${(s.rate * 100).round()}%)' : '${_label(e.key)}(${s.logWrong}회)';
         }).toList();
         return l.isEmpty ? '없음' : l.join(', ');
       }
-      final wrongTexts = cur.wrongByText.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+      final wrongTexts = (useCount ? cur.wrongLogByText : cur.wrongByText).entries.toList()..sort((a, b) => b.value.compareTo(a.value));
       final words = wrongTexts.take(10).map((e) => e.key).join(', ');
       return '''속기 학습 취약점 분석 결과입니다. (약어에 등록한 운지 기준, $periodText)
 
@@ -4798,7 +4799,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
 
     Widget rankRow(int i, MapEntry<String, double> e) {
       final s = cur.stats[e.key]!;
-      final txt = useRate ? '오답률 ${(s.rate * 100).round()}%  (${s.wrong}/${s.attempts})' : '오답 ${s.wrong}회';
+      final txt = useRate ? '오답률 ${(s.rate * 100).round()}%  (${s.wrong}/${s.attempts})' : '오답 ${s.logWrong}회';
       String? delta;
       Color dc = Colors.grey;
       final pv = _scoreOf(_prev, e.key, byCount: useCount);
@@ -4834,8 +4835,9 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
     // 누른 키를 쓰는 약어 중 틀린 것
     Widget detail() {
       final id = _sel!;
-      final list = _abbrs.where((a) => abbrWeakKeys(a).contains(id) && (cur.wrongByText[a.quizText] ?? 0) > 0).toList()
-        ..sort((a, b) => (cur.wrongByText[b.quizText] ?? 0).compareTo(cur.wrongByText[a.quizText] ?? 0));
+      final wmap = useCount ? cur.wrongLogByText : cur.wrongByText;
+      final list = _abbrs.where((a) => abbrWeakKeys(a).contains(id) && (wmap[a.quizText] ?? 0) > 0).toList()
+        ..sort((a, b) => (wmap[b.quizText] ?? 0).compareTo(wmap[a.quizText] ?? 0));
       final shown = list.take(24).toList();
       return Container(
         width: double.infinity, margin: const EdgeInsets.only(top: 6, bottom: 4), padding: const EdgeInsets.all(14),
@@ -4852,7 +4854,7 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14),
                   border: Border.all(color: const Color(0xFFFFE0B0))),
-              child: Text('${a.quizText}  ${cur.wrongByText[a.quizText]}회',
+              child: Text('${a.quizText}  ${wmap[a.quizText]}회',
                   style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)))).toList()),
             if (list.length > shown.length)
               Padding(padding: const EdgeInsets.only(top: 6),
@@ -4886,6 +4888,14 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
             const SizedBox(width: 6),
             _PB(label: '전체', value: '0', sel: '$_days', onTap: (v) => setState(() { _days = int.parse(v); _sel = null; _load(); })),
           ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            _PB(label: '오답 횟수', value: 'count', sel: _byRate ? 'rate' : 'count',
+                onTap: (v) => setState(() { _byRate = false; _sel = null; })),
+            const SizedBox(width: 6),
+            _PB(label: '오답률', value: 'rate', sel: _byRate ? 'rate' : 'count',
+                onTap: (v) => setState(() { _byRate = true; _sel = null; })),
+          ]),
           const SizedBox(height: 10),
           Container(width: double.infinity, padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(color: kBlueLight, borderRadius: BorderRadius.circular(12)),
@@ -4894,7 +4904,9 @@ class _WeakPointScreenState extends State<WeakPointScreen> {
                   ? '$periodText 약어 테스트 ${cur.totalAttempts}문제 기록 기준 · 출제 대비 오답률이에요. (출제 3번 미만인 키는 칠하지 않아요)'
                   : fellBack
                       ? '출제 기록(${cur.totalAttempts}문제)은 있지만 키마다 아직 3번 미만이라 오답 횟수 기준으로 칠했어요. 테스트가 쌓이면 오답률로 바뀌어요.'
-                      : '아직 출제 기록이 적어서(${cur.totalAttempts}문제) 지금은 오답 횟수 기준이에요. 테스트를 계속하면 오답률로 바뀌어요.',
+                      : cur.rateMode
+                          ? '예전 오답 기록까지 모두 합친 오답 횟수 기준이에요. 출제 대비 비율로 보려면 위의 "오답률"을 눌러 보세요.'
+                          : '오답 횟수 기준이에요. 약어 테스트 기록(${cur.totalAttempts}문제)이 30문제를 넘으면 "오답률"로도 볼 수 있어요.',
               style: const TextStyle(fontSize: 11, color: kBlueDark, height: 1.5))),
           const SizedBox(height: 14),
           if (scores.isEmpty)
